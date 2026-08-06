@@ -14,14 +14,37 @@ away from one block then fails its still-wanted siblings.
 import { SharedReadCache } from '@gmod/shared-read-cache'
 
 const cache = new SharedReadCache({
-  maxSize: 100 * 2 ** 20,
-  sizeOf: chunk => chunk.byteLength,
   cacheKey: chunk => chunk.toString(),
   fill: (chunk, signal) => readChunk(chunk, { signal }),
 })
 
 const data = await cache.get(chunk, opts.signal)
 ```
+
+## Budgets are opt-in
+
+There is no default limit. What a sensible one is depends entirely on what you
+are caching, so the package does not prescribe one:
+
+```js
+const cache = new SharedReadCache({
+  maxSize: 100 * 2 ** 20,
+  sizeOf: chunk => chunk.byteLength,
+  cacheKey: chunk => chunk.toString(),
+  fill: (chunk, signal) => readChunk(chunk, { signal }),
+})
+```
+
+A budget bounds _retained_ memory, not request size. Nothing is ever refused for
+being too large: a value bigger than the whole budget is still kept, reads in
+flight are never evicted, and eviction only discards a value already returned
+once — so the worst a budget can cost is a re-read.
+
+Unbounded is the permissive default, not the safe one. With no budget the cache
+grows for the life of the object; `@gmod/tabix` measured 2GB RSS panning a dense
+VCF before it bounded this. Pass one if the values are large or the object is
+long-lived. `cache.maxSize = n` later evicts immediately, which is how a
+consumer sheds memory under pressure.
 
 ## `sizeOf` is the point
 

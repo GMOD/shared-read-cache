@@ -32,11 +32,25 @@ export interface SharedReadCacheOptions<K, V> {
   fill?: (key: K, signal: AbortSignal) => Promise<V>
 
   /**
-   * Budget, in whatever unit {@link sizeOf} returns. Settable later: lowering
-   * it evicts immediately rather than waiting for the next read, which is what
-   * a consumer shedding memory under pressure needs.
+   * Budget, in whatever unit {@link sizeOf} returns. Defaults to `Infinity`:
+   * this package does not prescribe a limit, because what a sensible one is
+   * depends entirely on what is being cached.
+   *
+   * Note what a budget does and does not do. It bounds *retained* memory, not
+   * request size: a value larger than the whole budget is still kept, reads in
+   * flight are never evicted, and eviction only ever discards a value already
+   * returned once. So nothing is refused for being too large, and the worst a
+   * budget can cost is a re-read.
+   *
+   * Unbounded is therefore the permissive default, not the safe one. A cache
+   * with no budget grows for the life of the object — @gmod/tabix measured 2GB
+   * RSS panning a dense VCF before it bounded this. Pass one if the values are
+   * large or the object is long-lived.
+   *
+   * Settable later: lowering it evicts immediately rather than waiting for the
+   * next read, which is what a consumer shedding memory under pressure needs.
    */
-  maxSize: number
+  maxSize?: number
 
   /**
    * Weighs a settled value against `maxSize`. Defaults to 1, making the budget
@@ -95,6 +109,14 @@ export interface SharedReadCacheOptions<K, V> {
  *
  * A rejection is dropped rather than cached, so one transient failure does not
  * poison the key for the life of the cache.
+ *
+ * ## On "LRU"
+ *
+ * With no {@link SharedReadCacheOptions.maxSize} nothing is ever evicted, so
+ * this is a shared-read memo and not an LRU at all — least-recently-used is an
+ * *eviction order*, and there is no eviction to order. Recency is still tracked
+ * while unbounded, cheaply, so that imposing a budget later evicts the right
+ * entries rather than the oldest-inserted ones.
  */
 export class SharedReadCache<K, V> {
   private entries = new Map<string, Entry<V>>()
@@ -109,7 +131,7 @@ export class SharedReadCache<K, V> {
 
   constructor({
     fill,
-    maxSize,
+    maxSize = Infinity,
     sizeOf = () => 1,
     cacheKey = (key: K) => String(key),
     evictionPolicy = 'lru',
@@ -369,6 +391,9 @@ export class SharedReadCache<K, V> {
   }
 
   private evict() {
+    if (this.limit === Infinity) {
+      return
+    }
     if (this.evictionPolicy === 'batch') {
       for (const [cacheKey, entry] of this.entries) {
         if (this.total <= this.limit) {

@@ -533,3 +533,40 @@ test('getIfCached marks the entry most recently used', async () => {
   expect(cache.has('a')).toBe(true)
   expect(cache.has('b')).toBe(false)
 })
+
+test('the cache is unbounded unless a budget is given', async () => {
+  // the package prescribes no limit: what a sensible one is depends entirely on
+  // what is being cached, so a consumer that wants a bound passes one
+  const cache = new SharedReadCache<number, number[]>({
+    sizeOf: v => v.length,
+    fill: key => Promise.resolve(new Array<number>(key).fill(0)),
+  })
+
+  for (let i = 1; i <= 5; i++) {
+    await cache.get(i * 1000)
+  }
+
+  expect(cache.maxSize).toBe(Infinity)
+  expect(cache.size).toBe(5)
+  expect(cache.totalSize).toBe(15000)
+})
+
+test('a budget can be imposed on a cache that started unbounded', async () => {
+  const cache = new SharedReadCache<number, number>({
+    fill: key => Promise.resolve(key),
+  })
+  await cache.get(1)
+  await cache.get(2)
+  await cache.get(3)
+  expect(cache.size).toBe(3)
+
+  // 1 is the most recently used despite being the oldest inserted. Recency has
+  // to be tracked even while unbounded, or imposing a budget now would evict by
+  // insertion order and throw away exactly the entry most likely to be wanted.
+  void cache.getIfCached(1)
+
+  cache.maxSize = 1
+  expect(cache.size).toBe(1)
+  expect(cache.has(1)).toBe(true)
+  expect(cache.has(3)).toBe(false)
+})
