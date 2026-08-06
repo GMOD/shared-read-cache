@@ -726,3 +726,18 @@ test('idle sweeping composes with a size budget', async () => {
     vi.useRealTimers()
   }
 })
+
+test('a zero or negative idle timeout means no idle eviction', async () => {
+  vi.useFakeTimers()
+  try {
+    for (const idleTimeoutMs of [0, -1000]) {
+      const cache = new SharedReadCache<string, number>({ idleTimeoutMs })
+      await cache.get('a', undefined, () => Promise.resolve(1))
+      vi.advanceTimersByTime(1_000_000)
+      expect(cache.size).toBe(1)
+      expect(vi.getTimerCount()).toBe(0)
+    }
+  } finally {
+    vi.useRealTimers()
+  }
+})

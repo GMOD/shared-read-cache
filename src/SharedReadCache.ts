@@ -1,5 +1,24 @@
 import { throwIfAborted } from './throwIfAborted.ts'
 
+/**
+ * Node holds the process open for a pending interval, and a library's
+ * housekeeping timer must never be the reason a script fails to exit.
+ *
+ * Duck-typed rather than cast, because the return of `setInterval` is a
+ * `Timeout` object in Node and a plain number in browsers and workers, and this
+ * package is built once for both.
+ */
+function unrefIfPossible(timer: unknown) {
+  if (
+    typeof timer === 'object' &&
+    timer !== null &&
+    'unref' in timer &&
+    typeof timer.unref === 'function'
+  ) {
+    timer.unref()
+  }
+}
+
 interface Entry<V> {
   promise: Promise<V>
   /**
@@ -170,17 +189,16 @@ export class SharedReadCache<K, V> {
     sizeOf = () => 1,
     cacheKey = (key: K) => String(key),
     evictionPolicy = 'lru',
-    idleTimeoutMs,
+    idleTimeoutMs = 0,
   }: SharedReadCacheOptions<K, V>) {
     this.fill = fill
     this.evictionPolicy = evictionPolicy
     this.limit = maxSize
     this.sizeOf = sizeOf
     this.toCacheKey = cacheKey
-    this.idleTimeoutMs =
-      idleTimeoutMs !== undefined && idleTimeoutMs > 0
-        ? idleTimeoutMs
-        : undefined
+    // 0, undefined and a nonsense negative all mean "no idle eviction", so the
+    // rest of the class has one thing to check rather than three
+    this.idleTimeoutMs = idleTimeoutMs > 0 ? idleTimeoutMs : undefined
   }
 
   /** Number of entries held, including reads still in flight. */
@@ -352,18 +370,7 @@ export class SharedReadCache<K, V> {
     this.sweepTimer = setInterval(() => {
       this.sweepIdle()
     }, interval)
-    // Node holds the process open for a pending interval; a library timer must
-    // never be the reason a script does not exit. Guarded because browsers and
-    // workers return a number here, with no unref on it.
-    const timer: unknown = this.sweepTimer
-    if (
-      typeof timer === 'object' &&
-      timer !== null &&
-      'unref' in timer &&
-      typeof timer.unref === 'function'
-    ) {
-      timer.unref()
-    }
+    unrefIfPossible(this.sweepTimer)
   }
 
   private stopSweep() {
