@@ -1,3 +1,9 @@
+## [1.4.2](https://github.com/GMOD/shared-read-cache/compare/v1.4.1...v1.4.2) (2026-08-06)
+
+### Documentation
+
+- Stop citing @gmod/cram as the case FOR the batch policy
+
 ## [1.4.1](https://github.com/GMOD/shared-read-cache/compare/v1.4.0...v1.4.1) (2026-08-06)
 
 ### Refactoring
