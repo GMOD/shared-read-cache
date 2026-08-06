@@ -372,6 +372,50 @@ test('throwIfAborted works on a signal without the built-in method', () => {
   expect((thrown as DOMException).name).toBe('AbortError')
 })
 
+// The other half of supporting duck-typed signals: throwIfAborted has always
+// handled the aborted one, but a LIVE `{ aborted: false }` reaches join(), which
+// subscribed to it unconditionally. Every consumer of this package took the
+// TypeError on the first read of any call passing such a signal -- @gmod/bam's
+// getRecordsForRange answered `signal.addEventListener is not a function`
+// instead of records -- and none of them noticed, because the aborted case is
+// the one their tests model.
+test('a duck-typed signal with no addEventListener still gets its read', async () => {
+  const { fill, release } = parkedFill('data')
+  const cache = new SharedReadCache<string, string>({ fill, maxSize: 10 })
+
+  const signal = { aborted: false } as AbortSignal
+  const p = cache.get('k', signal)
+  release()
+  await expect(p).resolves.toBe('data')
+})
+
+test('a duck-typed signal pins the read, and still reports its own abort', async () => {
+  const { fill, stats, firstStarted, release } = parkedFill('data')
+  const cache = new SharedReadCache<string, string>({ fill, maxSize: 10 })
+
+  // an unsubscribable signal cannot be observed giving up, so it pins the read
+  // exactly as a signal-free caller does
+  const duck = { aborted: false }
+  const owner = new AbortController()
+  const ownerP = cache.get('k', owner.signal)
+  await firstStarted
+  const duckP = cache.get('k', duck as AbortSignal)
+  void Promise.allSettled([ownerP, duckP])
+  await tick()
+
+  owner.abort()
+  await tick()
+  expect(stats.cancelled).toBe(0)
+
+  // the duck flips while the read it pinned is still in flight: the read runs
+  // to completion, and the caller is still told about its own cancellation
+  duck.aborted = true
+  release()
+  await expect(ownerP).rejects.toThrow(/abort/i)
+  await expect(duckP).rejects.toThrow(/abort/i)
+  expect(stats.calls).toBe(1)
+})
+
 test('throwIfAborted throws the reason verbatim', () => {
   const controller = new AbortController()
   controller.abort('too slow')

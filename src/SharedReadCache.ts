@@ -175,7 +175,10 @@ export interface SharedReadCacheOptions<K, V> {
  * A read is cancelled only once **every** caller waiting on it has given up. A
  * caller with no signal cannot give up, so it pins the read — the honest
  * reading of a caller that never asked to be cancellable, and the reason one
- * signal-free consumer makes a read uncancellable for everyone joined to it.
+ * signal-free consumer makes a read uncancellable for everyone joined to it. A
+ * duck-typed signal with no `addEventListener` pins it for the same reason —
+ * nothing here can learn when such a caller gives up — and is still told about
+ * its own cancellation once the read settles.
  *
  * A rejection is dropped rather than cached, so one transient failure does not
  * poison the key for the life of the cache.
@@ -480,6 +483,22 @@ export class SharedReadCache<K, V> {
       if (!entry.pinned && entry.signals.size === 0) {
         entry.controller.abort(signal.reason)
       }
+    } else if (typeof signal.addEventListener !== 'function') {
+      // A duck-typed signal, not yet aborted. `{ aborted: false }` is what
+      // consumers hand-roll — @gmod/bam's test/csi.test.ts is one, and
+      // {@link throwIfAborted} exists because they are real — and subscribing
+      // to it was a TypeError rather than a read. It fired on the FIRST call
+      // that reached a cache with such a signal, so a consumer passing one got
+      // `signal.addEventListener is not a function` instead of its data.
+      //
+      // Pinned, for the same reason a signal-free caller is: nothing here can
+      // ever learn that this caller gave up, so the honest reading is that it
+      // cannot, and a read it is waiting on must not be cancelled out from
+      // under it. The caller is still told about its own cancellation — get()
+      // re-checks `aborted` after the read settles — so what it loses is only
+      // the ability to stop the read early, which is what an unsubscribable
+      // signal cannot ask for anyway.
+      entry.pinned = true
     } else if (!entry.signals.has(signal)) {
       // guarded so one signal joining the same key twice does not add two
       // listeners
