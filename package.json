@@ -1,6 +1,6 @@
 {
   "name": "@gmod/shared-read-cache",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "packageManager": "pnpm@11.15.1",
   "description": "A promise cache whose shared reads are cancelled only once every caller has given up",
   "license": "MIT",

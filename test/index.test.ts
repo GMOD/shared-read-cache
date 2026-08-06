@@ -436,3 +436,100 @@ test('the abort listener is torn down when the entry settles', async () => {
   await p
   expect(teardown?.aborted).toBe(true)
 })
+
+// The batch policy exists for a request that starts many reads at once and
+// holds every value until it returns -- evicting one mid-request frees nothing,
+// because the caller still has it, but it does guarantee the next identical
+// request re-reads it. @gmod/cram measured 117ms against 12ms for exactly this.
+test('the batch policy keeps every entry of one over-budget batch', async () => {
+  const cache = new SharedReadCache<number, number[]>({
+    maxSize: 2,
+    sizeOf: v => v.length,
+    evictionPolicy: 'batch',
+    fill: key => Promise.resolve([key, key]),
+  })
+
+  // two entries of 2 against a budget of 2, started together
+  await Promise.all([cache.get(1), cache.get(2)])
+
+  expect(cache.size).toBe(2)
+  expect(cache.totalSize).toBe(4)
+})
+
+test('the batch policy evicts the previous batch once a new one lands', async () => {
+  const cache = new SharedReadCache<number, number[]>({
+    maxSize: 2,
+    sizeOf: v => v.length,
+    evictionPolicy: 'batch',
+    fill: key => Promise.resolve([key, key]),
+  })
+
+  await Promise.all([cache.get(1), cache.get(2)])
+  // a later batch does not spare what the earlier one touched
+  await cache.get(3)
+
+  expect(cache.has(3)).toBe(true)
+  expect(cache.size).toBe(1)
+})
+
+test('the lru policy holds the budget as a hard ceiling', async () => {
+  const cache = new SharedReadCache<number, number[]>({
+    maxSize: 2,
+    sizeOf: v => v.length,
+    fill: key => Promise.resolve([key, key]),
+  })
+
+  // the same over-budget batch the batch policy keeps whole
+  await Promise.all([cache.get(1), cache.get(2)])
+
+  // default policy, so the budget is a memory guarantee and one has to go
+  expect(cache.size).toBe(1)
+  expect(cache.totalSize).toBe(2)
+})
+
+test('a fill can be passed per call rather than per cache', async () => {
+  // for a read that is a closure over the thing being read rather than a
+  // function of the key, which is how @gmod/cram decodes a slice
+  const cache = new SharedReadCache<string, string>({ maxSize: 10 })
+
+  const a = await cache.get('k', undefined, () => Promise.resolve('first'))
+  // second call hits the cache, so its fill is never run
+  const b = await cache.get('k', undefined, () => Promise.resolve('second'))
+
+  expect(a).toBe('first')
+  expect(b).toBe('first')
+})
+
+test('a cache with no fill at all says so', async () => {
+  const cache = new SharedReadCache<string, string>({ maxSize: 10 })
+  await expect(cache.get('k')).rejects.toThrow(/needs a fill/)
+})
+
+test('getIfCached returns the shared promise, or undefined', async () => {
+  const cache = new SharedReadCache<string, string>({
+    maxSize: 10,
+    fill: key => Promise.resolve(`v-${key}`),
+  })
+
+  expect(cache.getIfCached('a')).toBeUndefined()
+  const p = cache.get('a')
+  // the same shared promise, not a per-caller chain
+  expect(cache.getIfCached('a')).toBe(cache.getIfCached('a'))
+  expect(await cache.getIfCached('a')).toBe(await p)
+})
+
+test('getIfCached marks the entry most recently used', async () => {
+  const cache = new SharedReadCache<string, string>({
+    maxSize: 2,
+    fill: key => Promise.resolve(key),
+  })
+  await cache.get('a')
+  await cache.get('b')
+
+  // a lookup, not an inspection: this is what saves 'a' from the next eviction
+  void cache.getIfCached('a')
+  await cache.get('c')
+
+  expect(cache.has('a')).toBe(true)
+  expect(cache.has('b')).toBe(false)
+})
