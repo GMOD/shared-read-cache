@@ -1,3 +1,9 @@
+## [1.4.3](https://github.com/GMOD/shared-read-cache/compare/v1.4.2...v1.4.3) (2026-08-06)
+
+### Bug Fixes
+
+- A live duck-typed signal is no longer a TypeError
+
 ## [1.4.2](https://github.com/GMOD/shared-read-cache/compare/v1.4.1...v1.4.2) (2026-08-06)
 
 ### Documentation
