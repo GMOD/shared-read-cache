@@ -100,15 +100,33 @@ export interface SharedReadCacheOptions<K, V> {
    * `'lru'` evicts as each read settles, so the budget is a hard ceiling.
    *
    * `'batch'` waits until no reads are in flight and then spares everything
-   * that batch touched. Use it when a single request starts many reads at once
-   * and holds all of their values until it returns: evicting one mid-request
-   * frees nothing, because the caller is still holding it, but it does
-   * guarantee the next identical request re-reads it. @gmod/cram measured 117ms
-   * against 12ms on a repeated wide range for exactly this.
+   * that batch touched. The case for it: a single request that starts many
+   * reads at once and holds all of their values until it returns: evicting one
+   * mid-request frees nothing, because the caller is still holding it, but it
+   * does guarantee the next identical request re-reads it.
    *
-   * The trade is real, which is why it is not the default: a batch that touches
-   * more than the whole budget leaves the cache over it until the next batch
-   * lands. Do not use it where the budget is a memory guarantee.
+   * **Try a bigger {@link maxSize} first.** @gmod/cram adopted `'batch'` on a
+   * 117ms-against-12ms measurement and then dropped it again, and the sequence
+   * is the useful part. That measurement was taken with a budget 2.75x *below*
+   * the request's working set. Raising the budget above the working set made
+   * the two policies measurably identical — same re-read counts, times inside
+   * noise — because a request that fits has nothing to evict mid-flight
+   * whichever policy is in force. @gmod/bam measured the same thing from the
+   * other side: on a pan workload over an undersized budget, `'batch'` did not
+   * rescue it at all, matching `'lru'` re-read for re-read while retaining 1.7x
+   * the memory.
+   *
+   * So `'batch'` only changes anything when a batch exceeds the budget, and
+   * what it does there is exceed the budget: cram measured it holding 420,000
+   * records against a stated limit of 20,000. That is the documented trade — a
+   * batch touching more than the whole budget leaves the cache over it until
+   * the next batch lands — and it is worth being clear that it is the whole
+   * mechanism, not a side effect. A consumer lowering the budget to constrain
+   * memory will not get what it asked for.
+   *
+   * Reach for it when a too-small budget is genuinely forced on you and the
+   * workload is repeated identical requests. Otherwise size the budget above
+   * one request and leave this alone.
    */
   evictionPolicy?: 'lru' | 'batch'
   /**
