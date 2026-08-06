@@ -1,0 +1,15 @@
+## [1.2.0](https://github.com/GMOD/shared-read-cache/compare/...v1.2.0) (2026-08-06)
+
+### Chores
+
+- Let npm publish stop auto-correcting repository.url
+- Exempt our own packages from the release quarantine
+- Bump pnpm/action-setup to v6.0.10
+- Run the test suite as `pnpm test --run`
+
+### Features
+
+- A promise cache whose shared reads honour every caller's signal
+- A batch eviction policy, a per-call fill, and getIfCached
+- **BREAKING** No budget unless you ask for one
+
