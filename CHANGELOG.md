@@ -1,3 +1,9 @@
+## [1.4.1](https://github.com/GMOD/shared-read-cache/compare/v1.4.0...v1.4.1) (2026-08-06)
+
+### Refactoring
+
+- Pull the unref duck-type out of startSweep
+
 ## [1.4.0](https://github.com/GMOD/shared-read-cache/compare/v1.3.0...v1.4.0) (2026-08-06)
 
 ### Features
