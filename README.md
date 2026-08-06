@@ -46,6 +46,39 @@ VCF before it bounded this. Pass one if the values are large or the object is
 long-lived. `cache.maxSize = n` later evicts immediately, which is how a
 consumer sheds memory under pressure.
 
+## `idleTimeoutMs` — reclaiming while nothing is happening
+
+`maxSize` is enforced when a read settles, so an idle cache sits at whatever it
+reached and never gives it back. For an object that lives as long as its UI — a
+genome browser parked on a region, times every open track — that resting level
+is the memory that matters, and no budget alone will lower it.
+
+```js
+const cache = new SharedReadCache({
+  maxSize: 1024 * 2 ** 20, // the ceiling under load
+  idleTimeoutMs: 180_000, // ...but only while it is being used
+  sizeOf: chunk => chunk.byteLength,
+  fill: (chunk, signal) => readChunk(chunk, { signal }),
+})
+```
+
+The two answer different questions, and they work best together. `maxSize` wants
+to be **generous**: set below one request's working set it does not cache less,
+it caches _nothing_ — each value is evicted before the next request can reuse
+it, while the ones in flight are retained anyway. `idleTimeoutMs` is what makes
+a generous ceiling affordable, by turning it into a peak rather than a resting
+level.
+
+The clock runs from the last **read** of an entry, not from when it was filled,
+so something fetched once and used every second never expires. Reads in flight
+are never swept. `cache.sweepIdle()` reclaims on demand — on a tab going hidden,
+say — rather than waiting for the interval.
+
+The sweep costs nothing when the cache is empty: the timer starts with the first
+entry and the sweep that empties the cache stops it again, which is why there is
+no `dispose()` to forget to call. It is `unref`ed where that exists, so it will
+never hold a Node process open.
+
 ## `sizeOf` is the point
 
 This package exists because four gmod packages each hand-rolled the same cache,

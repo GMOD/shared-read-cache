@@ -18,6 +18,12 @@ interface Entry<V> {
   size: number
   /** touched by the batch in flight; only meaningful under the batch policy */
   touched: boolean
+  /**
+   * `Date.now()` at the last {@link SharedReadCache.get} or
+   * {@link SharedReadCache.getIfCached} that resolved to this entry.
+   * Only meaningful when {@link SharedReadCacheOptions.idleTimeoutMs} is set.
+   */
+  lastTouched: number
 }
 
 export interface SharedReadCacheOptions<K, V> {
@@ -86,6 +92,33 @@ export interface SharedReadCacheOptions<K, V> {
    * lands. Do not use it where the budget is a memory guarantee.
    */
   evictionPolicy?: 'lru' | 'batch'
+  /**
+   * Drop an entry once nothing has asked for it for this many milliseconds.
+   * Defaults to no idle eviction.
+   *
+   * This is the only reclamation that happens while a consumer sits still.
+   * {@link maxSize} is enforced when a read settles, so an idle cache stays at
+   * whatever it reached and never gives it back — fine for a short-lived
+   * object, expensive for one that lives as long as its UI does. A genome
+   * browser parked on a region holds its whole last view indefinitely, times
+   * every open track.
+   *
+   * The two compose and answer different questions. `maxSize` is the ceiling
+   * under load, and wants to be generous: set below one request's working set
+   * it does not cache less, it caches *nothing*, evicting each value before the
+   * next request can reuse it while still retaining the ones in flight.
+   * `idleTimeoutMs` is what makes a generous ceiling affordable, by making it a
+   * peak rather than a resting level.
+   *
+   * Measured from the last **read** of an entry, not from when it was filled:
+   * something fetched once and used every second is not idle, and an absolute
+   * expiry would throw it away mid-use for no reason.
+   *
+   * Reads still in flight are never swept, on the same grounds as eviction —
+   * they have no weight to reclaim and dropping one would lose the
+   * de-duplication every caller joined to it is relying on.
+   */
+  idleTimeoutMs?: number
 }
 
 /**
@@ -128,6 +161,8 @@ export class SharedReadCache<K, V> {
   private evictionPolicy: 'lru' | 'batch'
   /** reads still in flight, so the batch policy knows when the batch is done */
   private pending = 0
+  private idleTimeoutMs?: number
+  private sweepTimer?: ReturnType<typeof setInterval>
 
   constructor({
     fill,
@@ -135,12 +170,17 @@ export class SharedReadCache<K, V> {
     sizeOf = () => 1,
     cacheKey = (key: K) => String(key),
     evictionPolicy = 'lru',
+    idleTimeoutMs,
   }: SharedReadCacheOptions<K, V>) {
     this.fill = fill
     this.evictionPolicy = evictionPolicy
     this.limit = maxSize
     this.sizeOf = sizeOf
     this.toCacheKey = cacheKey
+    this.idleTimeoutMs =
+      idleTimeoutMs !== undefined && idleTimeoutMs > 0
+        ? idleTimeoutMs
+        : undefined
   }
 
   /** Number of entries held, including reads still in flight. */
@@ -195,6 +235,7 @@ export class SharedReadCache<K, V> {
       this.entries.delete(cacheKey)
       this.entries.set(cacheKey, entry)
       entry.touched = true
+      entry.lastTouched = Date.now()
       // A read every caller has abandoned is on its way out but may not have
       // noticed yet. Start a fresh one rather than join one already doomed —
       // joining it means inheriting a cancellation nothing to do with us.
@@ -246,6 +287,7 @@ export class SharedReadCache<K, V> {
     this.entries.delete(cacheKey)
     this.entries.set(cacheKey, entry)
     entry.touched = true
+    entry.lastTouched = Date.now()
     return entry.promise
   }
 
@@ -260,6 +302,75 @@ export class SharedReadCache<K, V> {
   clear() {
     this.entries.clear()
     this.total = 0
+    this.stopSweep()
+  }
+
+  /**
+   * Evict entries nothing has read for {@link SharedReadCacheOptions.idleTimeoutMs}.
+   *
+   * Exposed so a consumer can reclaim on its own schedule — a browser tab going
+   * hidden, say — rather than only on the interval. A no-op when no idle
+   * timeout is configured.
+   */
+  sweepIdle() {
+    const timeout = this.idleTimeoutMs
+    if (timeout === undefined) {
+      return
+    }
+    const cutoff = Date.now() - timeout
+    for (const [cacheKey, entry] of this.entries) {
+      // in-flight entries are skipped for the same reason evict() skips them:
+      // no weight to reclaim, and dropping one loses the de-duplication its
+      // waiters joined for
+      if (entry.settled && entry.lastTouched <= cutoff) {
+        this.deleteKey(cacheKey)
+      }
+    }
+    if (this.entries.size === 0) {
+      this.stopSweep()
+    }
+  }
+
+  // The sweep runs on an interval because it is the one form of reclamation
+  // that has to happen when nothing is calling in — a lazy check on get() would
+  // never fire on precisely the idle consumer this exists for.
+  //
+  // It costs nothing when the cache is empty: the timer starts with the first
+  // entry and the sweep that empties the cache stops it again. That is also
+  // what makes a dispose() method unnecessary. A consumer that drops the cache
+  // without clearing it leaves one timer alive for at most a timeout plus a
+  // sweep interval, after which the sweep empties the entries and stops itself,
+  // and the whole thing becomes garbage.
+  private startSweep() {
+    const timeout = this.idleTimeoutMs
+    if (timeout === undefined || this.sweepTimer !== undefined) {
+      return
+    }
+    // a fraction of the timeout, so the lag between an entry going idle and
+    // being reclaimed is bounded by ~1.25x it rather than 2x
+    const interval = Math.max(1000, Math.floor(timeout / 4))
+    this.sweepTimer = setInterval(() => {
+      this.sweepIdle()
+    }, interval)
+    // Node holds the process open for a pending interval; a library timer must
+    // never be the reason a script does not exit. Guarded because browsers and
+    // workers return a number here, with no unref on it.
+    const timer: unknown = this.sweepTimer
+    if (
+      typeof timer === 'object' &&
+      timer !== null &&
+      'unref' in timer &&
+      typeof timer.unref === 'function'
+    ) {
+      timer.unref()
+    }
+  }
+
+  private stopSweep() {
+    if (this.sweepTimer !== undefined) {
+      clearInterval(this.sweepTimer)
+      this.sweepTimer = undefined
+    }
   }
 
   // The read runs under the entry's own controller rather than any one caller's
@@ -286,8 +397,10 @@ export class SharedReadCache<K, V> {
       settled: false,
       size: 0,
       touched: true,
+      lastTouched: Date.now(),
     }
     this.entries.set(cacheKey, entry)
+    this.startSweep()
     this.pending++
     const settle = () => {
       entry.settled = true

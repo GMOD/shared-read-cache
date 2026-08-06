@@ -1,4 +1,4 @@
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 
 import { SharedReadCache, throwIfAborted } from '../src/index.ts'
 
@@ -569,4 +569,160 @@ test('a budget can be imposed on a cache that started unbounded', async () => {
   expect(cache.size).toBe(1)
   expect(cache.has(1)).toBe(true)
   expect(cache.has(3)).toBe(false)
+})
+
+// --- idle timeout ---------------------------------------------------------
+
+test('sweeps an entry nothing has read for the idle timeout', async () => {
+  vi.useFakeTimers()
+  try {
+    const cache = new SharedReadCache<string, number>({ idleTimeoutMs: 1000 })
+    await cache.get('a', undefined, () => Promise.resolve(1))
+    expect(cache.size).toBe(1)
+
+    vi.advanceTimersByTime(500)
+    expect(cache.size).toBe(1)
+
+    vi.advanceTimersByTime(1000)
+    expect(cache.size).toBe(0)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test('the timeout runs from the last read, not from the fill', async () => {
+  vi.useFakeTimers()
+  try {
+    const cache = new SharedReadCache<string, number>({ idleTimeoutMs: 1000 })
+    let fills = 0
+    const fill = () => {
+      fills++
+      return Promise.resolve(1)
+    }
+    await cache.get('a', undefined, fill)
+
+    // read it every 600ms — never idle for a full second, so never swept
+    for (let i = 0; i < 5; i++) {
+      vi.advanceTimersByTime(600)
+      await cache.get('a', undefined, fill)
+    }
+    expect(fills).toBe(1)
+    expect(cache.size).toBe(1)
+
+    // now leave it alone
+    vi.advanceTimersByTime(2000)
+    expect(cache.size).toBe(0)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test('never sweeps a read still in flight', async () => {
+  vi.useFakeTimers()
+  try {
+    const cache = new SharedReadCache<string, number>({ idleTimeoutMs: 1000 })
+    let release!: (v: number) => void
+    const parked = new Promise<number>(resolve => {
+      release = resolve
+    })
+    const p = cache.get('a', undefined, () => parked)
+
+    vi.advanceTimersByTime(5000)
+    // still in flight, so still there — dropping it would strand its waiters
+    expect(cache.size).toBe(1)
+
+    release(7)
+    await expect(p).resolves.toBe(7)
+    expect(cache.size).toBe(1)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test('no idle timeout means no sweeping and no timer', async () => {
+  vi.useFakeTimers()
+  try {
+    const cache = new SharedReadCache<string, number>({})
+    await cache.get('a', undefined, () => Promise.resolve(1))
+    vi.advanceTimersByTime(1_000_000)
+    expect(cache.size).toBe(1)
+    expect(vi.getTimerCount()).toBe(0)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test('the sweep timer stops once the cache empties, and restarts after', async () => {
+  vi.useFakeTimers()
+  try {
+    const cache = new SharedReadCache<string, number>({ idleTimeoutMs: 1000 })
+    await cache.get('a', undefined, () => Promise.resolve(1))
+    expect(vi.getTimerCount()).toBe(1)
+
+    vi.advanceTimersByTime(2000)
+    expect(cache.size).toBe(0)
+    // an idle consumer must not be left holding a ticking timer
+    expect(vi.getTimerCount()).toBe(0)
+
+    await cache.get('b', undefined, () => Promise.resolve(2))
+    expect(vi.getTimerCount()).toBe(1)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test('clear() stops the sweep timer', async () => {
+  vi.useFakeTimers()
+  try {
+    const cache = new SharedReadCache<string, number>({ idleTimeoutMs: 1000 })
+    await cache.get('a', undefined, () => Promise.resolve(1))
+    cache.clear()
+    expect(vi.getTimerCount()).toBe(0)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test('sweepIdle() reclaims on demand, without waiting for the interval', async () => {
+  vi.useFakeTimers()
+  try {
+    const cache = new SharedReadCache<string, number>({
+      idleTimeoutMs: 60_000,
+    })
+    await cache.get('stale', undefined, () => Promise.resolve(1))
+
+    // move the CLOCK without running timers, so the interval has provably not
+    // fired and only the manual call can be what reclaims
+    vi.setSystemTime(Date.now() + 61_000)
+    await cache.get('fresh', undefined, () => Promise.resolve(2))
+    expect(cache.size).toBe(2)
+
+    cache.sweepIdle()
+    expect(cache.size).toBe(1)
+    expect(cache.has('stale')).toBe(false)
+    expect(cache.has('fresh')).toBe(true)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test('idle sweeping composes with a size budget', async () => {
+  vi.useFakeTimers()
+  try {
+    const cache = new SharedReadCache<string, number>({
+      maxSize: 10,
+      sizeOf: () => 4,
+      idleTimeoutMs: 1000,
+    })
+    await cache.get('a', undefined, () => Promise.resolve(1))
+    await cache.get('b', undefined, () => Promise.resolve(2))
+    expect(cache.totalSize).toBe(8)
+
+    vi.advanceTimersByTime(2000)
+    expect(cache.size).toBe(0)
+    // the budget's bookkeeping has to come back to zero with the entries
+    expect(cache.totalSize).toBe(0)
+  } finally {
+    vi.useRealTimers()
+  }
 })
