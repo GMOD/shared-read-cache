@@ -61,6 +61,18 @@ class Membership {
  * keeps a working set whatever the track count — which is exactly what an
  * equal split cannot do.
  *
+ * ## Every member must weigh in the same unit
+ *
+ * {@link total} is a sum over members, so it means nothing unless their
+ * {@link SharedReadCacheOptions.sizeOf} agree. This is not hypothetical across
+ * these packages: @gmod/bam and @gmod/tabix weigh decompressed bytes, @gmod/bbi
+ * weighs entries, and @gmod/cram weighs decoded *records* — because a decoded
+ * record has no cheap size. A budget holding a bam cache and a cram cache would
+ * be adding bytes to records and bounding neither.
+ *
+ * Nothing here can check that, since `sizeOf` is opaque by design. Group
+ * members by unit and give each group its own budget.
+ *
  * ## Members are held weakly
  *
  * A long-lived budget must never be the reason a cache stays reachable. The
