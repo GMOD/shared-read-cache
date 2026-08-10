@@ -516,6 +516,34 @@ test('the batch policy evicts the previous batch once a new one lands', async ()
   expect(cache.size).toBe(1)
 })
 
+// evict() returns early when the cache is under its budget, which is why that
+// guard sits BELOW the batch branch rather than at the top: the batch branch
+// clears its touched marks unconditionally, and those marks are how it tells
+// the batch in flight from the previous one. Hoist the guard above it and
+// under-budget batches never get cleared, so everything reads as touched and
+// the first over-budget batch spares the whole cache instead of evicting.
+test('the batch policy still clears its marks while under budget', async () => {
+  const cache = new SharedReadCache<string, number>({
+    maxSize: 2,
+    sizeOf: () => 1,
+    evictionPolicy: 'batch',
+    fill: () => Promise.resolve(1),
+  })
+
+  // two batches that never reach the budget, so eviction never runs
+  await cache.get('a')
+  await cache.get('b')
+  expect(cache.size).toBe(2)
+
+  // the batch that tips it over: 'a' and 'b' belong to previous batches and
+  // must be evictable, so the oldest goes and the budget is held
+  await cache.get('c')
+  expect(cache.totalSize).toBe(2)
+  expect(cache.has('a')).toBe(false)
+  expect(cache.has('b')).toBe(true)
+  expect(cache.has('c')).toBe(true)
+})
+
 test('the lru policy holds the budget as a hard ceiling', async () => {
   const cache = new SharedReadCache<number, number[]>({
     maxSize: 2,
@@ -769,6 +797,186 @@ test('idle sweeping composes with a size budget', async () => {
   } finally {
     vi.useRealTimers()
   }
+})
+
+// The clock cannot start before the value exists. Stamped when the READ began,
+// an entry lost its fill duration out of its idle budget, and one whose fill
+// outran the timeout landed already expired — swept on the next tick, so the
+// query that paid for that read never got one hit off it.
+test('a fill slower than the timeout still gets the full timeout', async () => {
+  vi.useFakeTimers()
+  try {
+    const cache = new SharedReadCache<string, number>({ idleTimeoutMs: 1000 })
+    const p = cache.get(
+      'a',
+      undefined,
+      () =>
+        new Promise<number>(resolve => {
+          setTimeout(() => {
+            resolve(1)
+          }, 4000)
+        }),
+    )
+    await vi.advanceTimersByTimeAsync(4000)
+    await expect(p).resolves.toBe(1)
+
+    // 900ms of genuine idleness against a 1000ms timeout: still cached, even
+    // though the read began 4900ms ago
+    await vi.advanceTimersByTimeAsync(900)
+    expect(cache.size).toBe(1)
+
+    await vi.advanceTimersByTimeAsync(1100)
+    expect(cache.size).toBe(0)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+// The sweep timer roots this cache, and this cache roots whatever its fill
+// closes over. A read that never settles is never swept, so keying the stop on
+// an empty map let one stalled fetch tick forever and pin that whole graph —
+// precisely when a consumer has given up and dropped the cache.
+test('a read that never settles does not keep the sweep timer alive', async () => {
+  vi.useFakeTimers()
+  try {
+    const cache = new SharedReadCache<string, number>({ idleTimeoutMs: 1000 })
+    // parked and never released, like a stalled fetch on a dead connection
+    let release!: (v: number) => void
+    const stalled = new Promise<number>(resolve => {
+      release = resolve
+    })
+    expect(release).toBeTypeOf('function')
+    void cache.get('hung', undefined, () => stalled)
+    await cache.get('normal', undefined, () => Promise.resolve(1))
+    expect(vi.getTimerCount()).toBe(1)
+
+    await vi.advanceTimersByTimeAsync(2000)
+    // the settled entry is reclaimed, the hung one is correctly left alone —
+    // but nothing sweepable remains, so the timer must go
+    expect(cache.has('normal')).toBe(false)
+    expect(cache.has('hung')).toBe(true)
+    expect(vi.getTimerCount()).toBe(0)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+// In-flight reads are skipped by the sweep, so arming it for one buys nothing
+// and costs a consumer a ticking timer for the whole of a slow read.
+test('an in-flight read alone arms no sweep timer', async () => {
+  vi.useFakeTimers()
+  try {
+    const cache = new SharedReadCache<string, number>({ idleTimeoutMs: 1000 })
+    let release!: (v: number) => void
+    const p = cache.get(
+      'a',
+      undefined,
+      () =>
+        new Promise<number>(resolve => {
+          release = resolve
+        }),
+    )
+    expect(cache.size).toBe(1)
+    expect(vi.getTimerCount()).toBe(0)
+
+    release(7)
+    await expect(p).resolves.toBe(7)
+    // now there is something to reclaim
+    expect(vi.getTimerCount()).toBe(1)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+// The timer is armed when a read SETTLES, so a read still in flight when the
+// consumer clears the cache would re-arm it on landing — undoing the clear, and
+// leaving a timer on a cache the consumer has finished with. The settle path is
+// guarded on the entry still being the live one for its key, which is what
+// stops that.
+test('a read landing after clear() does not re-arm the sweep', async () => {
+  vi.useFakeTimers()
+  try {
+    const cache = new SharedReadCache<string, number>({ idleTimeoutMs: 1000 })
+    let release!: (v: number) => void
+    const parked = new Promise<number>(resolve => {
+      release = resolve
+    })
+    const p = cache.get('a', undefined, () => parked)
+    cache.clear()
+
+    release(1)
+    // the caller that asked for it is still answered — clear() drops the cache,
+    // not the read someone is waiting on
+    await expect(p).resolves.toBe(1)
+    expect(cache.size).toBe(0)
+    expect(vi.getTimerCount()).toBe(0)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+// The other half of the hung-read case: stopping the sweep must not be
+// permanent. A read parked long enough for the sweep to stop still has to be
+// reclaimable once it finally lands.
+test('a sweep stopped with a read in flight restarts when it settles', async () => {
+  vi.useFakeTimers()
+  try {
+    const cache = new SharedReadCache<string, number>({ idleTimeoutMs: 1000 })
+    let release!: (v: number) => void
+    const parked = new Promise<number>(resolve => {
+      release = resolve
+    })
+    const hung = cache.get('hung', undefined, () => parked)
+    await cache.get('normal', undefined, () => Promise.resolve(1))
+
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(vi.getTimerCount()).toBe(0)
+    expect(cache.has('hung')).toBe(true)
+
+    release(7)
+    await expect(hung).resolves.toBe(7)
+    // now there is something to reclaim again
+    expect(vi.getTimerCount()).toBe(1)
+
+    // and it is reclaimed on the ordinary schedule, timed from when it landed
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(cache.size).toBe(0)
+    expect(vi.getTimerCount()).toBe(0)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+// A rejection caches nothing, so there is nothing for a sweep to reclaim and no
+// reason for a failing consumer to be left holding a timer.
+test('a read that rejects arms no sweep timer', async () => {
+  vi.useFakeTimers()
+  try {
+    const cache = new SharedReadCache<string, number>({ idleTimeoutMs: 1000 })
+    await expect(
+      cache.get('a', undefined, () => Promise.reject(new Error('boom'))),
+    ).rejects.toThrow('boom')
+
+    expect(cache.size).toBe(0)
+    expect(vi.getTimerCount()).toBe(0)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+// evict()'s early return is a short-circuit, not a policy change: a cache under
+// its budget must still hold everything, and one over it must still evict to
+// exactly where it did before. Both are pinned by the budget tests above.
+test('a cache under its budget evicts nothing however many settle', async () => {
+  const cache = new SharedReadCache<number, number>({
+    maxSize: 1000,
+    sizeOf: () => 1,
+  })
+  for (let i = 0; i < 500; i++) {
+    await cache.get(i, undefined, () => Promise.resolve(i))
+  }
+  expect(cache.size).toBe(500)
+  expect(cache.totalSize).toBe(500)
 })
 
 test('a zero or negative idle timeout means no idle eviction', async () => {

@@ -69,15 +69,17 @@ it, while the ones in flight are retained anyway. `idleTimeoutMs` is what makes
 a generous ceiling affordable, by turning it into a peak rather than a resting
 level.
 
-The clock runs from the last **read** of an entry, not from when it was filled,
-so something fetched once and used every second never expires. Reads in flight
-are never swept. `cache.sweepIdle()` reclaims on demand — on a tab going hidden,
-say — rather than waiting for the interval.
+The clock runs from the last **read** of an entry, or from its fill settling if
+nothing has read it since, so something fetched once and used every second never
+expires — and a slow read still gets the full timeout to be reused in, rather
+than spending it on its own download. Reads in flight are never swept.
+`cache.sweepIdle()` reclaims on demand — on a tab going hidden, say — rather
+than waiting for the interval.
 
-The sweep costs nothing when the cache is empty: the timer starts with the first
-entry and the sweep that empties the cache stops it again, which is why there is
-no `dispose()` to forget to call. It is `unref`ed where that exists, so it will
-never hold a Node process open.
+The sweep runs only while there is something it could reclaim: armed by the
+first read to settle, stopped by the first sweep that finds no settled entry
+left, which is why there is no `dispose()` to forget to call. It is `unref`ed
+where that exists, so it will never hold a Node process open.
 
 ## `sizeOf` is the point
 
