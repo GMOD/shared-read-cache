@@ -1,3 +1,17 @@
+## [1.5.0](https://github.com/GMOD/shared-read-cache/compare/v1.4.4...v1.5.0) (2026-08-10)
+
+### Bug Fixes
+
+- The sweep timer runs when there is something to reclaim, not while entries exist
+
+### Documentation
+
+- A budget's members must all weigh in the same unit
+
+### Features
+
+- A budget several caches share, evicted globally least-recently-used
+
 ## [1.4.4](https://github.com/GMOD/shared-read-cache/compare/v1.4.3...v1.4.4) (2026-08-09)
 
 ## [1.4.3](https://github.com/GMOD/shared-read-cache/compare/v1.4.2...v1.4.3) (2026-08-06)
