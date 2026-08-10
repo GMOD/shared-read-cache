@@ -1,5 +1,7 @@
 import { throwIfAborted } from './throwIfAborted.ts'
 
+import type { BudgetMember, SharedBudget } from './SharedBudget.ts'
+
 /**
  * Node holds the process open for a pending interval, and a library's
  * housekeeping timer must never be the reason a script fails to exit.
@@ -18,6 +20,18 @@ function unrefIfPossible(timer: unknown) {
     timer.unref()
   }
 }
+
+/**
+ * Ticks on every touch, giving a total order over entries across *different*
+ * caches — which is what {@link SharedBudget} evicts by.
+ *
+ * `lastTouched` cannot do that job. `Date.now()` has millisecond resolution, so
+ * a burst of cache hits inside one millisecond all carry the same stamp, and a
+ * tie resolves to whichever member the budget happened to scan last rather than
+ * to anything about recency. Wall-clock is still what the idle sweep needs, so
+ * the two coexist: one answers "how long since", the other "which came first".
+ */
+let touchSeq = 0
 
 interface Entry<V> {
   promise: Promise<V>
@@ -43,6 +57,8 @@ interface Entry<V> {
    * Only meaningful when {@link SharedReadCacheOptions.idleTimeoutMs} is set.
    */
   lastTouched: number
+  /** {@link touchSeq} at the same moment, for cross-cache LRU order */
+  seq: number
 }
 
 export interface SharedReadCacheOptions<K, V> {
@@ -130,6 +146,21 @@ export interface SharedReadCacheOptions<K, V> {
    */
   evictionPolicy?: 'lru' | 'batch'
   /**
+   * A budget shared with other caches, evicted globally least-recently-used
+   * across all of them. Defaults to none.
+   *
+   * Composes with {@link maxSize} rather than replacing it: the per-cache
+   * ceiling still applies, and a cache that passes only a budget is unbounded
+   * on its own and bounded in aggregate — usually what you want, since the
+   * point of sharing is to let one busy member use most of the total.
+   *
+   * Reach for it when the number of caches is a property of the workload
+   * rather than of the code. A per-cache ceiling sized so that one cache never
+   * thrashes is, by construction, not a bound on N of them; see
+   * {@link SharedBudget} for what that measured.
+   */
+  budget?: SharedBudget
+  /**
    * Drop an entry once nothing has asked for it for this many milliseconds.
    * Defaults to no idle eviction.
    *
@@ -193,10 +224,13 @@ export interface SharedReadCacheOptions<K, V> {
  * while unbounded, cheaply, so that imposing a budget later evicts the right
  * entries rather than the oldest-inserted ones.
  */
-export class SharedReadCache<K, V> {
+export class SharedReadCache<K, V> implements BudgetMember {
   private entries = new Map<string, Entry<V>>()
   private total = 0
   private limit: number
+  private budget?: SharedBudget
+  /** how this cache reports its weight to {@link budget}; see SharedBudget */
+  private membership?: ReturnType<SharedBudget['register']>
   private fill?: (key: K, signal: AbortSignal) => Promise<V>
   private sizeOf: (value: V) => number
   private toCacheKey: (key: K) => string
@@ -213,10 +247,13 @@ export class SharedReadCache<K, V> {
     cacheKey = (key: K) => String(key),
     evictionPolicy = 'lru',
     idleTimeoutMs = 0,
+    budget,
   }: SharedReadCacheOptions<K, V>) {
     this.fill = fill
     this.evictionPolicy = evictionPolicy
     this.limit = maxSize
+    this.budget = budget
+    this.membership = budget?.register(this)
     this.sizeOf = sizeOf
     this.toCacheKey = cacheKey
     // 0, undefined and a nonsense negative all mean "no idle eviction", so the
@@ -277,6 +314,7 @@ export class SharedReadCache<K, V> {
       this.entries.set(cacheKey, entry)
       entry.touched = true
       entry.lastTouched = Date.now()
+      entry.seq = touchSeq++
       // A read every caller has abandoned is on its way out but may not have
       // noticed yet. Start a fresh one rather than join one already doomed —
       // joining it means inheriting a cancellation nothing to do with us.
@@ -329,6 +367,7 @@ export class SharedReadCache<K, V> {
     this.entries.set(cacheKey, entry)
     entry.touched = true
     entry.lastTouched = Date.now()
+    entry.seq = touchSeq++
     return entry.promise
   }
 
@@ -342,6 +381,7 @@ export class SharedReadCache<K, V> {
 
   clear() {
     this.entries.clear()
+    this.charge(-this.total)
     this.total = 0
     this.stopSweep()
   }
@@ -442,6 +482,7 @@ export class SharedReadCache<K, V> {
       size: 0,
       touched: true,
       lastTouched: Date.now(),
+      seq: touchSeq++,
     }
     this.entries.set(cacheKey, entry)
     this.pending++
@@ -453,6 +494,7 @@ export class SharedReadCache<K, V> {
       // arrived already expired, swept on the very next tick, so the query that
       // paid for that read never got a single hit off it.
       entry.lastTouched = Date.now()
+      entry.seq = touchSeq++
       this.pending--
       // nothing reads these once the read has settled, and holding them would
       // pin each caller's AbortController behind this entry
@@ -469,6 +511,7 @@ export class SharedReadCache<K, V> {
         if (this.entries.get(cacheKey) === entry) {
           entry.size = this.sizeOf(value)
           this.total += entry.size
+          this.charge(entry.size)
           // the first thing the sweep could actually reclaim, so this is where
           // the timer belongs — see startSweep
           this.startSweep()
@@ -548,7 +591,44 @@ export class SharedReadCache<K, V> {
     if (entry) {
       this.entries.delete(cacheKey)
       this.total -= entry.size
+      this.charge(-entry.size)
     }
+  }
+
+  private charge(delta: number) {
+    if (this.budget && this.membership) {
+      this.budget.charge(this.membership, delta)
+    }
+  }
+
+  /**
+   * @internal — {@link SharedBudget} asks; nothing else should.
+   *
+   * The least-recently-used settled entry, or `undefined` if this cache holds
+   * at most one. Iteration order is least-recently-used first, so this returns
+   * on the second settled entry it sees rather than walking the map.
+   */
+  lruSpare() {
+    let spare: { cacheKey: string; seq: number } | undefined
+    for (const [cacheKey, entry] of this.entries) {
+      // in flight: no weight to reclaim, and dropping one loses the
+      // de-duplication its waiters joined for
+      if (!entry.settled) {
+        continue
+      }
+      if (spare === undefined) {
+        spare = { cacheKey, seq: entry.seq }
+      } else {
+        // a second settled entry exists, so the first one is genuinely spare
+        return spare
+      }
+    }
+    return undefined
+  }
+
+  /** @internal — {@link SharedBudget} evicting on this cache's behalf. */
+  release(cacheKey: string) {
+    this.deleteKey(cacheKey)
   }
 
   /**
@@ -568,6 +648,9 @@ export class SharedReadCache<K, V> {
   private maybeEvict() {
     if (this.evictionPolicy === 'lru' || this.pending === 0) {
       this.evict()
+      // after the local pass, so a cache that can get under its own ceiling
+      // does that first and only then competes for the shared one
+      this.budget?.evict()
     }
   }
 
