@@ -329,13 +329,14 @@ export class SharedReadCache<K, V> implements BudgetMember {
     const cacheKey = this.toCacheKey(key)
     let entry = this.entries.get(cacheKey)
     if (entry) {
-      this.touch(cacheKey, entry)
       // A read every caller has abandoned is on its way out but may not have
       // noticed yet. Start a fresh one rather than join one already doomed —
       // joining it means inheriting a cancellation nothing to do with us.
       if (this.isDoomed(entry)) {
         this.deleteKey(cacheKey)
         entry = undefined
+      } else {
+        this.touch(cacheKey, entry)
       }
     }
     entry ??= this.start(cacheKey, key, fill)
@@ -381,7 +382,6 @@ export class SharedReadCache<K, V> implements BudgetMember {
     if (!entry) {
       return undefined
     }
-    this.touch(cacheKey, entry)
     // A read every caller has abandoned is not a cached value, it is a
     // rejection on its way to happening. Handing it back gives this caller
     // someone else's cancellation, which it has no way to read as anything but
@@ -391,6 +391,7 @@ export class SharedReadCache<K, V> implements BudgetMember {
       this.deleteKey(cacheKey)
       return undefined
     }
+    this.touch(cacheKey, entry)
     return entry.promise
   }
 
@@ -416,7 +417,8 @@ export class SharedReadCache<K, V> implements BudgetMember {
    * and its {@link Entry.seq}, which {@link SharedBudget} compares across
    * caches.
    *
-   * The two have to move together, and this is the only place either moves —
+   * The two have to move together, and this is the only place either moves
+   * after {@link start} places a new entry at the front with a matching seq —
    * which is the point of it being one function. {@link lruSpare} takes an
    * entry from map order and reports *its* seq, so the budget's claim to evict
    * the globally least-recently-used entry holds only while the two orders
