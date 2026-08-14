@@ -137,10 +137,17 @@ export class SharedBudget {
    * limit, or until no member will give up another.
    */
   evict() {
+    // Before the limit is consulted, because pruning is not part of evicting:
+    // {@link total} is a documented public number and a member that has been
+    // collected owes nothing, whether or not there is a limit to compare it
+    // against. Guarded the other way round, an unlimited budget returned here
+    // and so never pruned at all — it reported 10,200 against members actually
+    // holding 400, and kept a Membership for every cache ever registered, which
+    // is the accumulation the weak refs exist to avoid.
+    this.prune()
     if (this.budgetLimit === Infinity) {
       return
     }
-    this.prune()
     while (this.total > this.budgetLimit) {
       let victimKey: string | undefined
       let victimAt = Infinity
