@@ -176,3 +176,95 @@ test('an unlimited budget never evicts', async () => {
   expect(a.size).toBe(4)
   expect(budget.total).toBe(400)
 })
+
+/**
+ * A cache whose reads park until the test resolves them by key, so reads can be
+ * made to settle in an order other than the one they were started in.
+ */
+function parked(budget: SharedBudget, weight: number) {
+  const resolvers = new Map<string, (value: string) => void>()
+  const cache = new SharedReadCache<string, string>({
+    budget,
+    sizeOf: () => weight,
+    fill: key =>
+      new Promise<string>(resolve => {
+        resolvers.set(key, resolve)
+      }),
+  })
+  return {
+    cache,
+    /** settle one parked read and let its handlers run */
+    settle: async (key: string) => {
+      resolvers.get(key)!(key)
+      await new Promise(resolve => {
+        setTimeout(resolve, 0)
+      })
+    },
+  }
+}
+
+function tick() {
+  return new Promise(resolve => {
+    setTimeout(resolve, 0)
+  })
+}
+
+// How long a read took is a property of the transport, not of how the consumer
+// is using the cache, so it says nothing about what will be wanted next. Order
+// evictions by it and the cache preferentially keeps whatever was slowest to
+// arrive -- in @gmod/tabix that is the largest chunk of the query, so the one
+// entry a member never gives up becomes its biggest, and a budget smaller than
+// that chunk is one it can never get back under. Measured at 3.2MB retained
+// against a 2MB budget.
+test('a slow read does not outrank one that was asked for earlier', async () => {
+  const budget = new SharedBudget(Infinity)
+  const { cache, settle } = parked(budget, 100)
+  cache.maxSize = 200
+
+  void cache.get('asked-first')
+  void cache.get('asked-second')
+  await tick()
+  // the slower read is the one asked for first, so it settles last
+  await settle('asked-second')
+  await settle('asked-first')
+
+  void cache.get('trigger')
+  await settle('trigger')
+
+  expect(cache.has('asked-first')).toBe(false)
+  expect(cache.has('asked-second')).toBe(true)
+  expect(cache.has('trigger')).toBe(true)
+})
+
+// lruSpare() takes a cacheKey from map order and reports *its* seq, and the
+// budget picks a victim by comparing those seqs across members. That only works
+// while the two orders agree. Settling used to stamp a fresh seq without moving
+// the entry, so a cache whose reads settled out of the order they were started
+// in handed the budget a seq belonging to some other entry -- and the budget
+// evicted a member that was not holding the oldest thing in the system.
+test('the budget compares seqs that describe the entries offered', async () => {
+  const budget = new SharedBudget(400)
+  const one = parked(budget, 100)
+  const two = parked(budget, 100)
+
+  // asked for in this order, so `x` is the oldest thing in the system
+  void one.cache.get('x')
+  void one.cache.get('x2')
+  void two.cache.get('p')
+  void two.cache.get('p2')
+  await tick()
+
+  // but cache two's reads come back first
+  await two.settle('p')
+  await two.settle('p2')
+  await one.settle('x')
+  await one.settle('x2')
+
+  void two.cache.get('trigger')
+  await two.settle('trigger')
+
+  expect(one.cache.has('x')).toBe(false)
+  expect(one.cache.has('x2')).toBe(true)
+  expect(two.cache.has('p')).toBe(true)
+  expect(two.cache.has('p2')).toBe(true)
+})

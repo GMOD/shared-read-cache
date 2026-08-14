@@ -993,3 +993,44 @@ test('a zero or negative idle timeout means no idle eviction', async () => {
     vi.useRealTimers()
   }
 })
+
+// get() already refuses to join a read every caller has abandoned, starting a
+// fresh one in its place. getIfCached has no read to start, so the equivalent
+// answer is that there is nothing cached -- handing back the shared promise
+// gives this caller a rejection carrying some other caller's abort reason,
+// which it has no way to read as anything but its own read failing.
+test('getIfCached does not hand back a read every caller has abandoned', async () => {
+  const { fill, firstStarted } = parkedFill('data', { honourAbort: false })
+  const cache = new SharedReadCache<string, string>({ fill, maxSize: 10 })
+
+  const owner = new AbortController()
+  const p = cache.get('k', owner.signal)
+  void p.catch(() => undefined)
+  await firstStarted
+  owner.abort()
+  await tick()
+
+  expect(cache.getIfCached('k')).toBeUndefined()
+  // and it is gone, so the next reader starts over rather than finding it again
+  expect(cache.has('k')).toBe(false)
+})
+
+// A failed read is dropped from the map before it is marked settled, so it is
+// never one of the settled entries eviction counts. Mark it first and every
+// rejection credits back an entry that was never counted -- the count sinks
+// below the truth, eviction reads it as "nothing left to spare" and stops, and
+// the budget silently stops being a budget.
+test('rejections do not make the budget stop binding', async () => {
+  const cache = new SharedReadCache<number, number>({
+    maxSize: 3,
+    fill: key =>
+      key % 2 === 0 ? Promise.reject(new Error('boom')) : Promise.resolve(key),
+  })
+
+  for (let key = 0; key < 40; key++) {
+    await cache.get(key).catch(() => undefined)
+  }
+
+  expect(cache.totalSize).toBe(3)
+  expect(cache.size).toBe(3)
+})

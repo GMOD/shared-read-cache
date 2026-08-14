@@ -49,8 +49,13 @@ interface Entry<V> {
   settled: boolean
   /** 0 until the read settles and the value can be weighed */
   size: number
-  /** touched by the batch in flight; only meaningful under the batch policy */
-  touched: boolean
+  /**
+   * The batch this entry was last touched by; only meaningful under the batch
+   * policy, which spares everything carrying the batch in flight's number.
+   * Compared against a counter rather than cleared entry by entry, so ending a
+   * batch is O(1) instead of O(entries).
+   */
+  batch: number
   /**
    * `Date.now()` at the last {@link SharedReadCache.get} or
    * {@link SharedReadCache.getIfCached} that resolved to this entry.
@@ -227,6 +232,15 @@ export interface SharedReadCacheOptions<K, V> {
 export class SharedReadCache<K, V> implements BudgetMember {
   private entries = new Map<string, Entry<V>>()
   private total = 0
+  /**
+   * How many of {@link entries} have settled. Maintained rather than counted,
+   * because {@link evict} needs it on every settle and a cache sitting at its
+   * ceiling is over the limit on every settle — so the O(entries) count it
+   * replaces was the steady-state cost of having a budget at all. That count
+   * measured 8.6us per read over 100 entries and 134us over 20,000; maintaining
+   * it instead holds 7.4us and 14us across the same range.
+   */
+  private settledCount = 0
   private limit: number
   private budget?: SharedBudget
   /** how this cache reports its weight to {@link budget}; see SharedBudget */
@@ -237,6 +251,8 @@ export class SharedReadCache<K, V> implements BudgetMember {
   private evictionPolicy: 'lru' | 'batch'
   /** reads still in flight, so the batch policy knows when the batch is done */
   private pending = 0
+  /** the batch in flight; see {@link Entry.batch} */
+  private batch = 0
   private idleTimeoutMs?: number
   private sweepTimer?: ReturnType<typeof setInterval>
 
@@ -309,17 +325,12 @@ export class SharedReadCache<K, V> implements BudgetMember {
     const cacheKey = this.toCacheKey(key)
     let entry = this.entries.get(cacheKey)
     if (entry) {
-      // re-insert so Map iteration order stays least-recently-used first
-      this.entries.delete(cacheKey)
-      this.entries.set(cacheKey, entry)
-      entry.touched = true
-      entry.lastTouched = Date.now()
-      entry.seq = touchSeq++
+      this.touch(cacheKey, entry)
       // A read every caller has abandoned is on its way out but may not have
       // noticed yet. Start a fresh one rather than join one already doomed —
       // joining it means inheriting a cancellation nothing to do with us.
-      if (!entry.settled && entry.controller.signal.aborted) {
-        this.delete(key)
+      if (this.isDoomed(entry)) {
+        this.deleteKey(cacheKey)
         entry = undefined
       }
     }
@@ -356,6 +367,9 @@ export class SharedReadCache<K, V> implements BudgetMember {
    * The promise is the shared one, so awaiting it does not register the caller
    * as a waiter and its rejection is not re-reported per caller. Callers that
    * want either should use {@link get}.
+   *
+   * `undefined` too for a read every caller has already abandoned, which is not
+   * a cached value but a rejection that has not landed yet.
    */
   getIfCached(key: K) {
     const cacheKey = this.toCacheKey(key)
@@ -363,11 +377,16 @@ export class SharedReadCache<K, V> implements BudgetMember {
     if (!entry) {
       return undefined
     }
-    this.entries.delete(cacheKey)
-    this.entries.set(cacheKey, entry)
-    entry.touched = true
-    entry.lastTouched = Date.now()
-    entry.seq = touchSeq++
+    this.touch(cacheKey, entry)
+    // A read every caller has abandoned is not a cached value, it is a
+    // rejection on its way to happening. Handing it back gives this caller
+    // someone else's cancellation, which it has no way to read as anything but
+    // a failed read — so answer as if the entry were not here, which is what
+    // get() effectively does by starting a fresh read in its place.
+    if (this.isDoomed(entry)) {
+      this.deleteKey(cacheKey)
+      return undefined
+    }
     return entry.promise
   }
 
@@ -383,7 +402,36 @@ export class SharedReadCache<K, V> implements BudgetMember {
     this.entries.clear()
     this.charge(-this.total)
     this.total = 0
+    this.settledCount = 0
     this.stopSweep()
+  }
+
+  /**
+   * Mark an entry most-recently-used, in both orders that word has here: its
+   * position in {@link entries}, which {@link evict} and {@link lruSpare} walk,
+   * and its {@link Entry.seq}, which {@link SharedBudget} compares across
+   * caches.
+   *
+   * The two have to move together, and this is the only place either moves —
+   * which is the point of it being one function. {@link lruSpare} takes an
+   * entry from map order and reports *its* seq, so the budget's claim to evict
+   * the globally least-recently-used entry holds only while the two orders
+   * agree. They did not: settling stamped a fresh seq without moving the entry,
+   * so any read that settled out of the order it was started in left its cache
+   * offering the budget a seq belonging to some other entry.
+   */
+  private touch(cacheKey: string, entry: Entry<V>) {
+    // re-insert so Map iteration order stays least-recently-used first
+    this.entries.delete(cacheKey)
+    this.entries.set(cacheKey, entry)
+    entry.batch = this.batch
+    entry.lastTouched = Date.now()
+    entry.seq = touchSeq++
+  }
+
+  /** In flight, but every caller waiting on it has already given up. */
+  private isDoomed(entry: Entry<V>) {
+    return !entry.settled && entry.controller.signal.aborted
   }
 
   /**
@@ -480,7 +528,7 @@ export class SharedReadCache<K, V> implements BudgetMember {
       dispose: new AbortController(),
       settled: false,
       size: 0,
-      touched: true,
+      batch: this.batch,
       lastTouched: Date.now(),
       seq: touchSeq++,
     }
@@ -488,13 +536,6 @@ export class SharedReadCache<K, V> implements BudgetMember {
     this.pending++
     const settle = () => {
       entry.settled = true
-      // The idle clock starts when the value exists, not when the read for it
-      // began. Stamped only at start(), an entry lost its whole fill duration
-      // out of its idle budget — and one whose fill outran idleTimeoutMs
-      // arrived already expired, swept on the very next tick, so the query that
-      // paid for that read never got a single hit off it.
-      entry.lastTouched = Date.now()
-      entry.seq = touchSeq++
       this.pending--
       // nothing reads these once the read has settled, and holding them would
       // pin each caller's AbortController behind this entry
@@ -509,6 +550,21 @@ export class SharedReadCache<K, V> implements BudgetMember {
         // a later read may have replaced this key while this one was in
         // flight; charging its weight to that entry would double-count
         if (this.entries.get(cacheKey) === entry) {
+          // The idle clock starts when the value exists, not when the read for
+          // it began. Stamped only at start(), an entry lost its whole fill
+          // duration out of its idle budget — and one whose fill outran
+          // idleTimeoutMs arrived already expired, swept on the very next tick,
+          // so the query that paid for that read never got a single hit off it.
+          //
+          // Deliberately not a touch(). "How long since" and "which came first"
+          // are different questions, and only the first one is about the value
+          // existing: a read's *latency* is a property of the transport, not of
+          // how the consumer is using the cache, so ordering evictions by it
+          // preferentially keeps whatever was slowest to arrive. In @gmod/tabix
+          // that is the largest chunk in the query, which is the last thing a
+          // budget should be retaining.
+          entry.lastTouched = Date.now()
+          this.settledCount++
           entry.size = this.sizeOf(value)
           this.total += entry.size
           this.charge(entry.size)
@@ -519,12 +575,13 @@ export class SharedReadCache<K, V> implements BudgetMember {
         this.maybeEvict()
       },
       () => {
-        settle()
         // a failed read caches nothing, so the next caller starts over rather
-        // than inheriting the failure
+        // than inheriting the failure. Dropped before settle() marks it, so it
+        // is never one of the settledCount entries deleteKey credits back.
         if (this.entries.get(cacheKey) === entry) {
-          this.entries.delete(cacheKey)
+          this.deleteKey(cacheKey)
         }
+        settle()
         this.maybeEvict()
       },
     )
@@ -590,6 +647,9 @@ export class SharedReadCache<K, V> implements BudgetMember {
     const entry = this.entries.get(cacheKey)
     if (entry) {
       this.entries.delete(cacheKey)
+      if (entry.settled) {
+        this.settledCount--
+      }
       this.total -= entry.size
       this.charge(-entry.size)
     }
@@ -606,21 +666,20 @@ export class SharedReadCache<K, V> implements BudgetMember {
    *
    * The least-recently-used settled entry, or `undefined` if this cache holds
    * at most one. Iteration order is least-recently-used first, so this returns
-   * on the second settled entry it sees rather than walking the map.
+   * on the first settled entry it sees rather than walking the map.
    */
   lruSpare() {
-    let spare: { cacheKey: string; seq: number } | undefined
+    // Before the scan: the budget asks every member on every eviction, and a
+    // member with nothing to spare would otherwise walk past all of its
+    // in-flight reads to discover that.
+    if (this.settledCount <= 1) {
+      return undefined
+    }
     for (const [cacheKey, entry] of this.entries) {
       // in flight: no weight to reclaim, and dropping one loses the
       // de-duplication its waiters joined for
-      if (!entry.settled) {
-        continue
-      }
-      if (spare === undefined) {
-        spare = { cacheKey, seq: entry.seq }
-      } else {
-        // a second settled entry exists, so the first one is genuinely spare
-        return spare
+      if (entry.settled) {
+        return { cacheKey, seq: entry.seq }
       }
     }
     return undefined
@@ -663,38 +722,30 @@ export class SharedReadCache<K, V> implements BudgetMember {
         if (this.total <= this.limit) {
           break
         }
-        if (!entry.touched && entry.settled) {
+        if (entry.batch !== this.batch && entry.settled) {
           this.deleteKey(cacheKey)
         }
       }
-      for (const entry of this.entries.values()) {
-        entry.touched = false
-      }
+      // Ends the batch. Bumping the number the survivors are compared against
+      // ages every one of them out at once, where clearing a mark per entry was
+      // O(entries) on every batch — including the batches under budget, which
+      // reach here only to do that.
+      this.batch++
       return
     }
 
-    // Before counting anything. This runs on every settle, and the count below
-    // is O(entries) — which a cache comfortably under its budget was paying for
-    // nothing, since the loop after it breaks on its first iteration. Measured
-    // at 1.5x on 200 entries, 3.7x on 2000 and 14.2x on 10000 against the same
-    // workload with no budget at all.
+    // Before the loop below, which a cache comfortably under its budget would
+    // otherwise enter and leave for nothing on every settle.
     if (this.total <= this.limit) {
       return
     }
 
-    let settled = 0
-    for (const entry of this.entries.values()) {
-      if (entry.settled) {
-        settled++
-      }
-    }
     for (const [cacheKey, entry] of this.entries) {
-      if (this.total <= this.limit || settled <= 1) {
+      if (this.total <= this.limit || this.settledCount <= 1) {
         break
       }
       if (entry.settled) {
         this.deleteKey(cacheKey)
-        settled--
       }
     }
   }
