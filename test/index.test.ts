@@ -1015,6 +1015,17 @@ test('getIfCached does not hand back a read every caller has abandoned', async (
   expect(cache.has('k')).toBe(false)
 })
 
+test('a cache can be constructed with no options at all', async () => {
+  // the memo shape: no budget, no sizeOf, a fill passed per call. @gmod/bam,
+  // @gmod/tabix and indexedfasta-js all build one, and all wrote `({})`.
+  const cache = new SharedReadCache<string, string>()
+
+  const value = await cache.get('k', undefined, () => Promise.resolve('v'))
+  expect(value).toBe('v')
+  expect(cache.maxSize).toBe(Infinity)
+  expect(cache.size).toBe(1)
+})
+
 // A failed read is dropped from the map before it is marked settled, so it is
 // never one of the settled entries eviction counts. Mark it first and every
 // rejection credits back an entry that was never counted -- the count sinks

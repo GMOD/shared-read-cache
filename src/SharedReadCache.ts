@@ -264,7 +264,11 @@ export class SharedReadCache<K, V> implements BudgetMember {
     evictionPolicy = 'lru',
     idleTimeoutMs = 0,
     budget,
-  }: SharedReadCacheOptions<K, V>) {
+    // Defaulted, because a cache with no options at all is a real shape and a
+    // common one: the memo, whose fill is a closure passed per get() call. Five
+    // of these exist across @gmod/bam, @gmod/tabix and indexedfasta-js, and
+    // every one of them was written `new SharedReadCache({})`.
+  }: SharedReadCacheOptions<K, V> = {}) {
     this.fill = fill
     this.evictionPolicy = evictionPolicy
     this.limit = maxSize
