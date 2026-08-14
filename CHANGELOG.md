@@ -1,3 +1,24 @@
+## [1.6.0](https://github.com/GMOD/shared-read-cache/compare/v1.5.1...v1.6.0) (2026-08-14)
+
+### Bug Fixes
+
+- The budget compared seqs describing entries it was not offered ([7d8d6da](https://github.com/GMOD/shared-read-cache/commit/7d8d6da383bad0b651476896b60205579336fc31))
+- An unlimited budget never pruned its collected members ([b6bad58](https://github.com/GMOD/shared-read-cache/commit/b6bad584f3d02d52e0c2a6ec75872bbcbd8f60d5))
+
+### Chores
+
+- Render only the commit subject, and link the commit ([f00b82f](https://github.com/GMOD/shared-read-cache/commit/f00b82f3a7545044848d6b912766916e4c2cdc1e))
+- Create a GitHub release for each published tag ([0a260a5](https://github.com/GMOD/shared-read-cache/commit/0a260a50ce3c5ba4635ed7862a182a03a26788e8))
+- Enforce type strippability in tsconfig ([7358ecb](https://github.com/GMOD/shared-read-cache/commit/7358ecb801d99590c9f8d3615e3585811b38abb8))
+
+### Features
+
+- The constructor takes no options at all ([317ca60](https://github.com/GMOD/shared-read-cache/commit/317ca60375a826697732178fff1279f827560f40))
+
+### Refactoring
+
+- Drop an entry before touching it, not after ([c14fa68](https://github.com/GMOD/shared-read-cache/commit/c14fa68e44a5b39ef8724068e25c91289c5f93c2))
+
 ## [1.5.1](https://github.com/GMOD/shared-read-cache/compare/v1.5.0...v1.5.1) (2026-08-10)
 
 ### Chores
