@@ -106,7 +106,8 @@ Omit `sizeOf` and the budget counts entries.
 
 ## Relationship to `@gmod/abortable-promise-cache`
 
-This replaces it, and fixes two things that package got wrong:
+`@gmod/abortable-promise-cache` was this module's earlier inspiration. This
+replaces it, and fixes two things that package got wrong:
 
 - it never took a listener back off a caller's signal, so a long-lived signal
   accumulated one per key it ever touched
