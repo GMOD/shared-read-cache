@@ -1,0 +1,45 @@
+// Source for docs/img/eviction.svg, which docs/memory.md embeds.
+// Regenerate with: dot -Tsvg docs/img/eviction.dot -o docs/img/eviction.svg
+//
+// The four ways an entry leaves, and what triggers each. The get() path itself
+// is img/dataflow.dot; same palette, and yellow means the same thing in both.
+digraph eviction {
+  rankdir=LR
+  bgcolor="white"
+  nodesep=0.28
+  ranksep=0.5
+  node [shape=box style="filled,rounded" fillcolor="#f6f8fa" color="#57606a"
+        fontname="Helvetica" fontsize=10 margin="0.14,0.07"]
+  edge [color="#57606a" fontname="Helvetica" fontsize=9]
+
+  settle  [label="a read settles" fillcolor="#ddf4ff" color="#0969da"]
+  timer   [label="sweep interval" fillcolor="#ddf4ff" color="#0969da"]
+  setmax  [label="cache.maxSize = n\nbudget.limit = n" fillcolor="#ddf4ff" color="#0969da"]
+  manual  [label="delete() / clear()" fillcolor="#ddf4ff" color="#0969da"]
+
+  pendcheck [label="batch policy:\nany read still in flight?"]
+  evict   [label="evict to maxSize\nleast-recently-used first" fillcolor="#fff8c5" color="#9a6700"]
+  bevict  [label="SharedBudget.evict()\nglobally least-recently-used" fillcolor="#fff8c5" color="#9a6700"]
+  sweep   [label="sweepIdle()\nlastTouched older than idleTimeoutMs" fillcolor="#fff8c5" color="#9a6700"]
+  gone    [label="entry dropped, weight credited back" fillcolor="#dafbe1" color="#1a7f37"]
+  keep    [label="skipped: a read still in flight" fillcolor="#fbefff" color="#8250df"]
+  last    [label="kept: the last settled entry" fillcolor="#fbefff" color="#8250df"]
+  spared  [label="spared until the batch drains" fillcolor="#fbefff" color="#8250df"]
+
+  settle -> pendcheck
+  pendcheck -> evict [label=" no, or 'lru' policy "]
+  pendcheck -> spared [style=dashed label=" yes "]
+  setmax -> evict
+  setmax -> bevict
+  timer -> sweep
+  evict -> bevict [label=" then "]
+  evict -> gone
+  bevict -> gone
+  sweep -> gone
+  manual -> gone
+  evict -> keep [style=dashed]
+  bevict -> keep [style=dashed]
+  sweep -> keep [style=dashed]
+  evict -> last [style=dashed]
+  bevict -> last [style=dashed]
+}

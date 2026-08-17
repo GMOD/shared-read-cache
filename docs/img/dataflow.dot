@@ -1,0 +1,72 @@
+// Source for docs/img/dataflow.svg, which docs/dataflow.md embeds.
+// Regenerate with: dot -Tsvg docs/img/dataflow.dot -o docs/img/dataflow.svg
+//
+// One get() call, from the caller's key to the caller's value. Deliberately the
+// main path only — what happens to an entry AFTER it settles is the second
+// diagram, img/eviction.dot, because drawing both in one made neither readable.
+//
+// SYNC: the palette, legend and node style come from
+// ~/src/gmod/bam-js/docs/img/dataflow.dot and its siblings in tabix-js and
+// cram-js. The categories differ — nothing here is wasm or I/O of its own — so
+// green is the consumer's fill rather than I/O this package performs.
+digraph sharedreadcache {
+  rankdir=TB
+  bgcolor="white"
+  nodesep=0.3
+  ranksep=0.36
+  node [shape=box style="filled,rounded" fillcolor="#f6f8fa" color="#57606a"
+        fontname="Helvetica" fontsize=10 margin="0.14,0.07"]
+  edge [color="#57606a" fontname="Helvetica" fontsize=9]
+
+  get     [label="get(key, signal)" fillcolor="#ddf4ff" color="#0969da"]
+  pre     [label="throwIfAborted(signal)"]
+  lookup  [label="entries.get(cacheKey(key))" fillcolor="#fff8c5" color="#9a6700"]
+  doomed  [label="every waiter gave up?"]
+  touch   [label="touch: most-recently-used" fillcolor="#fff8c5" color="#9a6700"]
+  start   [label="start: own AbortController" fillcolor="#fff8c5" color="#9a6700"]
+  fill    [label="fill(key, sharedSignal)" fillcolor="#dafbe1" color="#1a7f37"]
+  join    [label="join: signal → waiters, or pin"]
+  await   [label="await the one shared promise" fillcolor="#fff8c5" color="#9a6700"]
+  settle  [label="settle: sizeOf(value), charge" fillcolor="#fff8c5" color="#9a6700"]
+  drop    [label="drop the key"]
+  cancel  [label="abort the shared read" fillcolor="#fbefff" color="#8250df"]
+  out     [label="value" fillcolor="#ddf4ff" color="#0969da"]
+  err     [label="this caller's abort reason" fillcolor="#ddf4ff" color="#0969da"]
+
+  get -> pre
+  pre -> err [style=dashed label=" already aborted "]
+  pre -> lookup
+  lookup -> doomed [label=" hit "]
+  lookup -> start [label=" miss "]
+  doomed -> start [style=dashed label=" yes: discard "]
+  doomed -> touch [label=" no "]
+  touch -> join
+  start -> fill
+  start -> join
+  join -> await
+  join -> cancel [style=dashed label=" last waiter aborts "]
+  cancel -> fill [style=dashed]
+  fill -> settle [label=" resolve "]
+  fill -> drop [label=" reject "]
+  settle -> await
+  drop -> await
+  await -> out
+  await -> err [style=dashed label=" aborted meanwhile "]
+
+  subgraph cluster_legend {
+    label="Legend"
+    labelloc="t"
+    fontname="Helvetica"
+    fontsize=10
+    fontcolor="#57606a"
+    color="#d0d7de"
+    style="rounded"
+    margin=10
+    node [shape=box style="filled,rounded" fontsize=9 margin="0.1,0.04"]
+    l1 [label="one caller" fillcolor="#ddf4ff" color="#0969da"]
+    l2 [label="the consumer's read" fillcolor="#dafbe1" color="#1a7f37"]
+    l3 [label="cached / shared" fillcolor="#fff8c5" color="#9a6700"]
+    l4 [label="cancellation" fillcolor="#fbefff" color="#8250df"]
+    l1 -> l2 -> l3 -> l4 [style=invis]
+  }
+}

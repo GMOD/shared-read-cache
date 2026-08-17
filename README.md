@@ -21,6 +21,16 @@ const cache = new SharedReadCache({
 const data = await cache.get(chunk, opts.signal)
 ```
 
+## Docs
+
+- [docs/dataflow.md](docs/dataflow.md) — how one `get()` flows, with a diagram:
+  where a caller's signal is checked, what `join` does with it, and what
+  settling an entry costs
+- [docs/memory.md](docs/memory.md) — the four ways an entry leaves the cache,
+  and what each of `maxSize`, `idleTimeoutMs`, `evictionPolicy` and
+  `SharedBudget` measured
+- [docs/api.md](docs/api.md) — every option and method
+
 ## Budgets are opt-in
 
 There is no default limit. What a sensible one is depends entirely on what you
@@ -80,6 +90,24 @@ The sweep runs only while it has something to reclaim: the first read to settle
 arms it, and the first sweep that finds no settled entry stops it, which is why
 there is no `dispose()` to forget to call. It `unref`s itself where that exists,
 so it will never hold a Node process open.
+
+## One budget across several caches
+
+A per-cache ceiling is not a bound on a consumer that scales the number of
+caches — one cache per open file, sized so that a single one never thrashes,
+multiplies. `SharedBudget` bounds them in aggregate, evicting whatever is
+globally least-recently-used, so an idle cache hands its space to a busy one:
+
+```js
+const budget = new SharedBudget(1024 * 2 ** 20)
+const cache = new SharedReadCache({ budget, sizeOf, fill })
+```
+
+It composes with `maxSize` rather than replacing it, it holds its members weakly
+so there is no `unregister` to forget, and every member must weigh in the same
+unit — a budget adding one cache's bytes to another's record counts bounds
+neither. [docs/memory.md](docs/memory.md) has what dividing a ceiling by the
+file count measured instead.
 
 ## `sizeOf` is the point
 
