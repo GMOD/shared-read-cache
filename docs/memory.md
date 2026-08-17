@@ -38,7 +38,10 @@ what is being cached, so the package does not guess.
 
 Unbounded is the permissive default, not the safe one. With no budget the cache
 grows for the life of the object; `@gmod/tabix` measured 2 GB RSS panning a
-dense VCF before it bounded this.
+dense VCF before it bounded this
+([tabix-js/docs/caching.md](https://github.com/GMOD/tabix-js/blob/main/docs/caching.md#chunkcachesize-never-refuses-a-read),
+which also has what a pinned budget twenty times under the default cost: 47
+refills out of 47 against 0).
 
 `cache.maxSize = n` is an accessor, not a field, so lowering it evicts
 immediately. As a plain field it did nothing until the next read happened to run
@@ -61,6 +64,8 @@ spending it on its own download. The sweep skips reads in flight.
 The interval is a quarter of the timeout, bounding the lag between an entry
 going idle and being reclaimed at about 1.25x rather than 2x. `sweepIdle()`
 reclaims on demand — on a tab going hidden, say — instead of waiting for it.
+`@gmod/bam` measured a pan that held 331 MB going to 0 MB once idle
+([ADR 0015](https://github.com/GMOD/bam-js/blob/main/agent-docs/adr/0015-reclaim-the-chunk-cache-when-nothing-is-using-it.md)).
 
 **There is no `dispose()` to forget to call.** The timer is armed by the first
 read to _settle_ and stopped by the first sweep that finds no settled entry
@@ -93,7 +98,11 @@ does there is exceed the budget — cram measured it holding 420,000 records
 against a stated limit of 20,000. That is the mechanism, not a side effect: a
 consumer lowering the budget to constrain memory will not get what it asked for.
 Reach for it when a too-small budget is genuinely forced on you and the workload
-is repeated identical requests.
+is repeated identical requests. No consumer currently does: both sides are
+written up where they were measured, in
+[cram-js ADR 0005](https://github.com/GMOD/cram-js/blob/main/docs/adr/0005-drop-the-batch-eviction-policy.md)
+and
+[bam-js ADR 0013](https://github.com/GMOD/bam-js/blob/main/agent-docs/adr/0013-the-batch-eviction-policy-does-not-transfer.md).
 
 Ending a batch bumps a counter that the survivors' marks are compared against,
 which ages all of them out at once; clearing a mark per entry would be
@@ -115,7 +124,10 @@ revisit; split eight ways as 128 MB each it cost 101, against 98 for the cold
 pass — worse than no cache at all. A shared budget does not have that failure,
 because a member yields only what is _globally_ least-recently-used: tracks the
 reader is not looking at age out and hand their space to the one being panned,
-so the active track keeps a working set whatever the track count.
+so the active track keeps a working set whatever the track count. The workload,
+the split, and the refill counts are
+[bam-js ADR 0018](https://github.com/GMOD/bam-js/blob/main/agent-docs/adr/0018-a-per-file-ceiling-is-not-a-bound-on-a-consumer-with-many-files.md),
+which is why this class exists.
 
 Two things to know before reaching for one:
 
@@ -154,3 +166,19 @@ not `touch()` the entry. A read's latency is a property of the transport, not of
 how the consumer is using the cache, so ordering evictions by it preferentially
 keeps whatever was slowest to arrive — in `@gmod/tabix` that is the largest
 chunk in the query, which is the last thing a budget should retain.
+
+## What none of this bounds
+
+Retained weight, not the heap. Reads in flight are never evicted, a query holds
+everything it parsed until it returns whether or not the cache still does, and a
+value weighed once at settle can grow afterwards — `@gmod/bam` memoizes `end`,
+`CIGAR` and `tags` onto a record the first time a renderer touches them, and
+measured +38% over the weighed size. Size these against what you want to _keep_,
+and bound total memory somewhere that can see the whole process.
+
+Both consumer caching docs have a section on this, with their own numbers:
+[bam-js](https://github.com/GMOD/bam-js/blob/main/docs/caching.md#none-of-them-bound-peak-memory)
+and
+[tabix-js](https://github.com/GMOD/tabix-js/blob/main/docs/caching.md#none-of-these-bound-peak-memory).
+[consumers.md](consumers.md) maps the rest of the measurements to where they
+were taken.

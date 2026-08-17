@@ -30,6 +30,9 @@ const data = await cache.get(chunk, opts.signal)
   and what each of `maxSize`, `idleTimeoutMs`, `evictionPolicy` and
   `SharedBudget` measured
 - [docs/api.md](docs/api.md) — every option and method
+- [docs/consumers.md](docs/consumers.md) — which gmod package uses this for
+  what, which of them can share a budget, and where each measurement above was
+  taken
 
 ## Budgets are opt-in
 
