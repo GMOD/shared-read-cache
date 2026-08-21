@@ -1,3 +1,13 @@
+## [1.7.1](https://github.com/GMOD/shared-read-cache/compare/v1.7.0...v1.7.1) (2026-08-21)
+
+### Bug Fixes
+
+- Total credits back a collected member without waiting for an eviction ([6fa0525](https://github.com/GMOD/shared-read-cache/commit/6fa05251315cfbe80d5f70a4a5d60303aa7b8c2f))
+
+### Chores
+
+- Run the suite with --expose-gc so the weak-ref tests are not skipped ([5645a3b](https://github.com/GMOD/shared-read-cache/commit/5645a3b3e372d1113827c97213861e560f91e92e))
+
 ## [1.7.0](https://github.com/GMOD/shared-read-cache/compare/v1.6.0...v1.7.0) (2026-08-21)
 
 ### Bug Fixes
