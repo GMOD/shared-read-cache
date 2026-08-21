@@ -111,8 +111,24 @@ export class SharedBudget {
    */
   private seq = 0
 
-  /** Sum of the settled weight held across every member. */
-  total = 0
+  private heldTotal = 0
+
+  /**
+   * Sum of the settled weight held across every member.
+   *
+   * An accessor, because a member that has been collected owes nothing and this
+   * is the number a consumer reports memory from. As a plain field it was only
+   * corrected when something happened to call {@link prune} — {@link evict} or
+   * {@link size} — so a budget sitting under its limit, which is a budget with
+   * no reason to evict, went on counting caches that no longer exist for as
+   * long as nothing else happened. That is the same 10,200-against-400 the
+   * pruning order inside {@link evict} was fixed for, reached by sitting still
+   * rather than by having no limit.
+   */
+  get total() {
+    this.prune()
+    return this.heldTotal
+  }
 
   constructor(limit: number) {
     this.budgetLimit = limit
@@ -160,7 +176,7 @@ export class SharedBudget {
   /** Adjust a member's contribution, and the total with it. */
   charge(membership: Membership, delta: number) {
     membership.held += delta
-    this.total += delta
+    this.heldTotal += delta
   }
 
   /**
@@ -179,7 +195,7 @@ export class SharedBudget {
     if (this.budgetLimit === Infinity) {
       return
     }
-    while (this.total > this.budgetLimit) {
+    while (this.heldTotal > this.budgetLimit) {
       let victimKey: string | undefined
       let victimAt = Infinity
       let victim: BudgetMember | undefined
@@ -205,7 +221,7 @@ export class SharedBudget {
   private prune() {
     for (const membership of this.members) {
       if (membership.ref.deref() === undefined) {
-        this.total -= membership.held
+        this.heldTotal -= membership.held
         this.members.delete(membership)
       }
     }
