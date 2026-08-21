@@ -87,6 +87,29 @@ class Membership {
 export class SharedBudget {
   private members = new Set<Membership>()
   private budgetLimit: number
+  /**
+   * Ticks on every touch across every member, giving the total order over
+   * entries that {@link evict} picks its victim by.
+   *
+   * `lastTouched` cannot do that job. `Date.now()` has millisecond resolution,
+   * so a burst of cache hits inside one millisecond all carry the same stamp,
+   * and a tie resolves to whichever member happened to be scanned last rather
+   * than to anything about recency. Wall-clock is still what a cache's idle
+   * sweep needs, so the two coexist: one answers "how long since", the other
+   * "which came first".
+   *
+   * It lives here, on the object the members share, rather than in a module
+   * variable beside the cache. This package ships an ESM build and a CJS one,
+   * so a consumer whose dependency graph reaches both gets two copies of that
+   * module and two counters, each starting at zero — and members from the two
+   * then offered this budget colliding stamps. Measured on one budget holding
+   * a cache from each build: it evicted the second-newest entry of seven and
+   * kept the genuinely oldest, which is the below-the-working-set cliff this
+   * class exists to avoid, arrived at through a build artifact rather than
+   * through any configuration. A shared budget is by definition one object, so
+   * a counter on it is one counter however many copies of the class exist.
+   */
+  private seq = 0
 
   /** Sum of the settled weight held across every member. */
   total = 0
@@ -124,6 +147,14 @@ export class SharedBudget {
     const membership = new Membership(member)
     this.members.add(membership)
     return membership
+  }
+
+  /**
+   * @internal — the next stamp in this budget's recency order. Members ask on
+   * every touch; nothing else should.
+   */
+  nextSeq() {
+    return this.seq++
   }
 
   /** Adjust a member's contribution, and the total with it. */

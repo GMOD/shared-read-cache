@@ -21,18 +21,6 @@ function unrefIfPossible(timer: unknown) {
   }
 }
 
-/**
- * Ticks on every touch, giving a total order over entries across *different*
- * caches — which is what {@link SharedBudget} evicts by.
- *
- * `lastTouched` cannot do that job. `Date.now()` has millisecond resolution, so
- * a burst of cache hits inside one millisecond all carry the same stamp, and a
- * tie resolves to whichever member the budget happened to scan last rather than
- * to anything about recency. Wall-clock is still what the idle sweep needs, so
- * the two coexist: one answers "how long since", the other "which came first".
- */
-let touchSeq = 0
-
 interface Entry<V> {
   promise: Promise<V>
   /**
@@ -69,7 +57,11 @@ interface Entry<V> {
    * Only meaningful when {@link SharedReadCacheOptions.idleTimeoutMs} is set.
    */
   lastTouched: number
-  /** {@link touchSeq} at the same moment, for cross-cache LRU order */
+  /**
+   * This cache's budget's stamp at the same moment, for the cross-cache LRU
+   * order that budget evicts by; 0 when there is no budget, which is when
+   * nothing compares entries across caches. See {@link SharedBudget.nextSeq}.
+   */
   seq: number
 }
 
@@ -497,7 +489,15 @@ export class SharedReadCache<K, V> implements BudgetMember {
     this.entries.set(cacheKey, entry)
     entry.batch = this.batch
     entry.lastTouched = Date.now()
-    entry.seq = touchSeq++
+    entry.seq = this.stamp()
+  }
+
+  /**
+   * This entry's place in the recency order {@link SharedBudget} evicts by.
+   * Only a budget compares these, so a cache without one has no order to keep.
+   */
+  private stamp() {
+    return this.budget ? this.budget.nextSeq() : 0
   }
 
   /** In flight, but every caller waiting on it has already given up. */
@@ -618,7 +618,7 @@ export class SharedReadCache<K, V> implements BudgetMember {
       size: 0,
       batch: this.batch,
       lastTouched: Date.now(),
-      seq: touchSeq++,
+      seq: this.stamp(),
     }
     this.entries.set(cacheKey, entry)
     this.pending++

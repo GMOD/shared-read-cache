@@ -1,4 +1,4 @@
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 
 import { SharedBudget, SharedReadCache } from '../src/index.ts'
 
@@ -267,4 +267,61 @@ test('the budget compares seqs that describe the entries offered', async () => {
   expect(one.cache.has('x2')).toBe(true)
   expect(two.cache.has('p')).toBe(true)
   expect(two.cache.has('p2')).toBe(true)
+})
+
+// The recency counter the budget picks its victim by has to be one counter, and
+// a module-level one is not. This package ships an ESM build and a CJS build, so
+// a consumer whose dependency graph reaches both loads the module twice and gets
+// two counters, each starting at zero -- members from the two then offer this
+// budget colliding stamps and the order it evicts by means nothing.
+//
+// resetModules is how that duplication is reproducible here: the second import
+// re-evaluates the module, which is exactly what a second copy in a bundle is.
+// Owning the counter puts it on the budget instead, and a shared budget is by
+// definition one object however many copies of the class exist.
+test('one budget orders its members even when the package is loaded twice', async () => {
+  const first = await import('../src/index.ts')
+  vi.resetModules()
+  const second = await import('../src/index.ts')
+  expect(second.SharedReadCache).not.toBe(first.SharedReadCache)
+
+  const budget = new first.SharedBudget(6)
+  const make = (m: typeof first) =>
+    new m.SharedReadCache<string, string>({
+      budget,
+      sizeOf: () => 1,
+      fill: key => Promise.resolve(key),
+    })
+  // registered first, so it loses any tie and a stale order shows up as a win
+  const a = make(first)
+  const b = make(second)
+
+  for (const key of ['b1', 'b2', 'b3', 'b4', 'b5']) {
+    await b.get(key)
+  }
+  // read last, so these two are the most recently used of all seven
+  await a.get('a1')
+  await a.get('a2')
+
+  expect(b.has('b1')).toBe(false)
+  expect(a.has('a1')).toBe(true)
+  expect(a.has('a2')).toBe(true)
+})
+
+test('a cache with no budget has no cross-cache order to keep', async () => {
+  const budget = new SharedBudget(10)
+  const unbudgeted = new SharedReadCache<string, string>({
+    sizeOf: () => 1,
+    fill: key => Promise.resolve(key),
+  })
+  const member = weighed(budget, 1)
+
+  await unbudgeted.get('x')
+  await member.get('a')
+  await member.get('b')
+
+  // the unbudgeted cache draws no stamps, so the budget's order is unbroken by
+  // a cache it does not hold
+  expect(budget.total).toBe(2)
+  expect(unbudgeted.totalSize).toBe(1)
 })
