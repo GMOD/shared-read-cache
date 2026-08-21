@@ -21,9 +21,11 @@ const cache = new SharedReadCache({
 const data = await cache.get(chunk, opts.signal)
 ```
 
-This caches what a read produced. For the bytes underneath it,
-[`@gmod/range-cache-filehandle`](https://github.com/GMOD/range-cache-filehandle)
-does the same job one layer down, over HTTP range requests.
+This package caches what a read produced, keyed however you like. The layer
+below it is
+[`@gmod/range-cache-filehandle`](https://github.com/GMOD/range-cache-filehandle),
+which does the same sort of thing for the raw bytes, caching HTTP byte ranges
+underneath a filehandle.
 
 ## Docs
 
