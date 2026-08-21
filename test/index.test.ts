@@ -1212,3 +1212,136 @@ test('a value sizeOf cannot weigh is not cached, and does not poison the key', a
   await expect(cache.get('a')).resolves.toBe('a')
   expect(cache.totalSize).toBe(1)
 })
+
+// The batch mark is advanced by a batch ENDING, which is a read settling with
+// none left in flight -- not by any eviction pass that happens to run. Advanced
+// down in evict(), the maxSize setter ended a batch still in flight: its
+// entries aged out the moment they settled, so a consumer shedding memory
+// mid-request quietly got lru behaviour out of a batch cache.
+test('lowering maxSize does not end the batch in flight', async () => {
+  const { fill, firstStarted, release } = parkedFill(1)
+  const cache = new SharedReadCache<string, number>({
+    fill,
+    maxSize: 100,
+    sizeOf: () => 1,
+    evictionPolicy: 'batch',
+  })
+
+  const batch = ['a', 'b', 'c'].map(key => cache.get(key))
+  await firstStarted
+  cache.maxSize = 2
+  release()
+  await Promise.all(batch)
+  await tick()
+
+  // the batch policy's whole contract: one over-budget batch is kept whole
+  expect(cache.size).toBe(3)
+})
+
+// evict() returns early when the cache is unbounded, so advancing the batch
+// mark from inside it never happened at all on a batch cache with no maxSize.
+// Every entry it ever held then carried the same mark as the batch in flight,
+// so imposing a budget later spared all of them -- and the maxSize setter,
+// whose whole point is to shed memory NOW rather than on the next read, freed
+// nothing. It took a further read landing to get under the budget just set.
+test('lowering maxSize on an unbounded batch cache evicts now', async () => {
+  const cache = new SharedReadCache<string, number>({
+    fill: () => Promise.resolve(1),
+    sizeOf: () => 1,
+    evictionPolicy: 'batch',
+  })
+
+  for (const key of ['a', 'b', 'c', 'd']) {
+    await cache.get(key)
+  }
+  expect(cache.totalSize).toBe(4)
+
+  cache.maxSize = 2
+
+  expect(cache.totalSize).toBe(2)
+  expect(cache.has('d')).toBe(true)
+})
+
+// The batch policy defers eviction until no read is in flight, because the
+// request that started them is still holding every value. A read every caller
+// has abandoned is held by nobody, so it is not what that defers for -- and
+// left counted it never stopped deferring, since a read cancelled against a
+// transport that ignores its signal never settles. One stalled fetch and the
+// cache never evicted again, however far past maxSize it went.
+test('an abandoned read does not defer batch eviction forever', async () => {
+  const cache = new SharedReadCache<string, number>({
+    maxSize: 2,
+    sizeOf: () => 1,
+    evictionPolicy: 'batch',
+  })
+
+  const controller = new AbortController()
+  const stalled = cache.get('stalled', controller.signal, () => {
+    // neither settles nor honours its signal, as LocalFile does not
+    return new Promise<number>(() => undefined)
+  })
+  await tick()
+
+  await cache.get('a', undefined, () => Promise.resolve(1))
+  await cache.get('b', undefined, () => Promise.resolve(1))
+  await cache.get('c', undefined, () => Promise.resolve(1))
+  // still deferred: someone is genuinely waiting on that read
+  expect(cache.totalSize).toBe(3)
+
+  controller.abort()
+  await expect(stalled).rejects.toThrow(/aborted/i)
+
+  await cache.get('d', undefined, () => Promise.resolve(1))
+  await cache.get('e', undefined, () => Promise.resolve(1))
+  expect(cache.totalSize).toBeLessThanOrEqual(2)
+})
+
+test('dropping a stalled read hands the batch policy back its budget', async () => {
+  const cache = new SharedReadCache<string, number>({
+    maxSize: 2,
+    sizeOf: () => 1,
+    evictionPolicy: 'batch',
+  })
+
+  void cache.get(
+    'stalled',
+    undefined,
+    () => new Promise<number>(() => undefined),
+  )
+  await tick()
+  for (const key of ['a', 'b', 'c']) {
+    await cache.get(key, undefined, () => Promise.resolve(1))
+  }
+  expect(cache.totalSize).toBe(3)
+
+  cache.delete('stalled')
+  // 'd' is the read that finally finds nothing in flight, so it ends the batch
+  // a,b,c belong to; 'e' is the next batch, which is the one that evicts them.
+  // A batch bigger than the whole budget exceeding it until the next one lands
+  // is the policy working, not the wedge -- what was broken is that no next one
+  // could ever land.
+  await cache.get('d', undefined, () => Promise.resolve(1))
+  await cache.get('e', undefined, () => Promise.resolve(1))
+  expect(cache.totalSize).toBeLessThanOrEqual(2)
+})
+
+test('clear() leaves no in-flight read deferring the next batch', async () => {
+  const cache = new SharedReadCache<string, number>({
+    maxSize: 2,
+    sizeOf: () => 1,
+    evictionPolicy: 'batch',
+  })
+
+  void cache.get(
+    'stalled',
+    undefined,
+    () => new Promise<number>(() => undefined),
+  )
+  await tick()
+  cache.clear()
+
+  for (const key of ['a', 'b', 'c', 'd']) {
+    await cache.get(key, undefined, () => Promise.resolve(1))
+  }
+  expect(cache.totalSize).toBeLessThanOrEqual(2)
+})

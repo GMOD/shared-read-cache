@@ -107,7 +107,16 @@ and
 Ending a batch bumps a counter that the survivors' marks are compared against,
 which ages all of them out at once; clearing a mark per entry would be
 O(entries) on every batch, including the batches under budget that reach there
-only to do that.
+only to do that. A batch ends when its last read _settles_, which is not the
+same as any eviction pass running — lowering `maxSize` runs one, and ending the
+batch in flight there would age out the very entries the policy exists to spare.
+
+What counts as in flight is a read someone is still waiting on. A read every
+caller has abandoned, or one the cache has dropped, stops deferring the batch
+immediately: nothing holds its value, so it is not what the deferral is for —
+and a read cancelled against a transport that ignores its signal never settles
+to say so. Counting one of those meant a single stalled fetch deferred eviction
+for the life of the cache, however far past `maxSize` it climbed.
 
 ## `SharedBudget` — when the cache count is a property of the workload
 
