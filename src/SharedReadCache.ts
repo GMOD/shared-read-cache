@@ -1,4 +1,4 @@
-import { throwIfAborted } from './throwIfAborted.ts'
+import { abortReason, throwIfAborted } from './throwIfAborted.ts'
 
 import type { BudgetMember, SharedBudget } from './SharedBudget.ts'
 
@@ -348,7 +348,7 @@ export class SharedReadCache<K, V> implements BudgetMember {
     }
 
     try {
-      const value = await entry.promise
+      const value = await this.settleFor(entry, signal)
       // the read finished, but this caller gave up while waiting for it
       throwIfAborted(signal)
       return value
@@ -360,6 +360,61 @@ export class SharedReadCache<K, V> implements BudgetMember {
       throwIfAborted(signal)
       throw e
     }
+  }
+
+  /**
+   * The shared read, but a caller that gives up while it is still running is
+   * released now rather than whenever that read lands.
+   *
+   * Awaiting `entry.promise` alone made abort() a request rather than an
+   * answer. The read is shared, so one caller aborting deliberately does not
+   * stop it — which left that caller pending until every *other* waiter was
+   * done: two callers on a 30s read, one aborts, and it waits the full 30s to
+   * be told about a cancellation it asked for itself. A fill that ignores the
+   * signal — a stalled fetch — never released it at all. Panning a genome
+   * browser is exactly this shape, since the abandoned blocks are the ones
+   * whose siblings are still wanted.
+   *
+   * Only for a read still in flight, and only for a signal that can be
+   * subscribed to. A settled entry has nothing left to wait for, and nothing
+   * here can learn when a duck-typed signal fires; both fall back to the
+   * post-await {@link throwIfAborted} in {@link get}, which is all either ever
+   * needed.
+   */
+  private settleFor(entry: Entry<V>, signal?: AbortSignal) {
+    if (
+      entry.settled ||
+      signal === undefined ||
+      typeof signal.addEventListener !== 'function'
+    ) {
+      return entry.promise
+    }
+    // Aborted once the race is decided, to take this listener back off the
+    // caller's signal. Without it a long-lived signal collects one listener per
+    // get() it ever made, which is the leak {@link Entry.dispose} exists to
+    // avoid on the other listener.
+    const unsubscribe = new AbortController()
+    return Promise.race([
+      // Losing this race leaves `entry.promise` unobserved here, which is safe
+      // only because start() attaches its own handlers to it — otherwise a read
+      // that failed after its last caller walked away would surface as an
+      // unhandled rejection.
+      entry.promise,
+      new Promise<never>((_resolve, reject) => {
+        signal.addEventListener(
+          'abort',
+          () => {
+            // the caller's own reason, verbatim, exactly as throwIfAborted
+            // would have thrown it -- see abortReason
+            // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+            reject(abortReason(signal))
+          },
+          { once: true, signal: unsubscribe.signal },
+        )
+      }),
+    ]).finally(() => {
+      unsubscribe.abort()
+    })
   }
 
   /**

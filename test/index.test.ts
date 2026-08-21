@@ -470,15 +470,19 @@ test('the abort listener is torn down when the entry settles', async () => {
 
   const p = cache.get('k', signal)
   await firstStarted
-  expect(captured).toHaveLength(1)
+  // Every listener a read puts on a caller's signal, not a count of them: get()
+  // registers one to track the waiter and one to release this caller early if
+  // it aborts, and the invariant is about each of them carrying a teardown --
+  // pinning the count here just breaks the next time a second one is needed.
+  expect(captured.length).toBeGreaterThan(0)
 
-  const teardown = captured[0]?.signal
-  expect(teardown).toBeDefined()
-  expect(teardown?.aborted).toBe(false)
+  const teardowns = captured.map(options => options?.signal)
+  expect(teardowns.every(signal => signal !== undefined)).toBe(true)
+  expect(teardowns.some(signal => signal?.aborted)).toBe(false)
 
   release()
   await p
-  expect(teardown?.aborted).toBe(true)
+  expect(teardowns.every(signal => signal?.aborted)).toBe(true)
 })
 
 // The batch policy exists for a request that starts many reads at once and
@@ -1044,4 +1048,120 @@ test('rejections do not make the budget stop binding', async () => {
 
   expect(cache.totalSize).toBe(3)
   expect(cache.size).toBe(3)
+})
+
+// A caller's abort has to be an answer, not a request. The read is shared, so
+// one caller aborting deliberately does not stop it -- and awaiting the shared
+// promise therefore left that caller pending until every OTHER waiter was done.
+// Two callers on a slow read, one aborts, and it waits out the full read to be
+// told about a cancellation it asked for itself. Panning a genome browser is
+// exactly this shape: the blocks being abandoned are the ones whose siblings
+// are still wanted, so the still-wanted sibling is what sets the delay.
+test('an aborting caller is released while the shared read runs on', async () => {
+  const { fill, firstStarted, release, stats } = parkedFill('data')
+  const cache = new SharedReadCache<string, string>({ fill })
+
+  const leaving = new AbortController()
+  const staying = new AbortController()
+  const abandoned = cache.get('k', leaving.signal)
+  const wanted = cache.get('k', staying.signal)
+  await firstStarted
+
+  leaving.abort()
+  await expect(abandoned).rejects.toThrow(/aborted/i)
+
+  // the read it walked away from is untouched: still running, still shared
+  expect(stats.cancelled).toBe(0)
+  expect(cache.waiterCount('k')).toBe(1)
+
+  release()
+  await expect(wanted).resolves.toBe('data')
+  expect(stats.calls).toBe(1)
+})
+
+// The same rule with nobody else waiting, against a transport that ignores its
+// signal -- `LocalFile` does, and a stalled fetch on a dead connection is the
+// case a consumer aborts for in the first place. There is no later settle to
+// carry the rejection here, so awaiting the shared promise never released this
+// caller at all.
+test('an aborting caller is released even when the read never settles', async () => {
+  const cache = new SharedReadCache<string, string>({
+    fill: () =>
+      new Promise<string>(() => {
+        // a transport that neither settles nor honours its signal
+      }),
+  })
+
+  const controller = new AbortController()
+  const p = cache.get('k', controller.signal)
+  await tick()
+
+  controller.abort()
+  await expect(p).rejects.toThrow(/aborted/i)
+})
+
+test('an aborting caller is released with its own reason', async () => {
+  const { fill, firstStarted } = parkedFill('data')
+  const cache = new SharedReadCache<string, string>({ fill })
+
+  const pinning = cache.get('k')
+  const controller = new AbortController()
+  const p = cache.get('k', controller.signal)
+  await firstStarted
+
+  controller.abort('panned away')
+  await expect(p).rejects.toBe('panned away')
+  void pinning.catch(() => 'the pinned read never settles')
+})
+
+// The early release subscribes to the caller's signal, so it has to unsubscribe
+// on the way out too -- the signal outlives any one read, and a listener per
+// get() is the leak the entry's dispose controller exists to prevent.
+test('a completed read leaves no listener on the caller signal', async () => {
+  const cache = new SharedReadCache<string, string>({
+    fill: key => Promise.resolve(key),
+  })
+
+  const controller = new AbortController()
+  let live = 0
+  const signal = new Proxy(controller.signal, {
+    get(target, prop) {
+      if (prop === 'addEventListener') {
+        return (
+          type: string,
+          listener: EventListener,
+          options?: AddEventListenerOptions,
+        ) => {
+          live++
+          options?.signal?.addEventListener('abort', () => {
+            live--
+          })
+          target.addEventListener(type, listener, options)
+        }
+      }
+      const value: unknown = Reflect.get(target, prop, target)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+
+  for (let i = 0; i < 20; i++) {
+    await cache.get(`k${i}`, signal)
+  }
+  await tick()
+  expect(live).toBe(0)
+})
+
+// A duck-typed signal cannot be subscribed to, so there is nothing to race the
+// read against and the early release has to sit the call out rather than throw
+// a TypeError at it -- which is the failure mode throwIfAborted exists for.
+test('a duck-typed signal still gets its read while one is in flight', async () => {
+  const { fill, release } = parkedFill('data')
+  const cache = new SharedReadCache<string, string>({ fill })
+
+  const signal = { aborted: false } as AbortSignal
+  const p = cache.get('k', signal)
+  await tick()
+  release()
+
+  await expect(p).resolves.toBe('data')
 })

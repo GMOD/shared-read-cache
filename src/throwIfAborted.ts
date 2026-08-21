@@ -17,14 +17,27 @@
  */
 export function throwIfAborted(signal?: AbortSignal) {
   if (signal?.aborted) {
-    const reason: unknown = signal.reason
-    // Spec-faithful: throwIfAborted throws `reason` verbatim, and `reason` is
-    // whatever the caller passed to abort() — `controller.abort('too slow')`
-    // makes it a string. Coercing it to an Error here would hide that from a
-    // consumer who set it deliberately.
-    // eslint-disable-next-line @typescript-eslint/only-throw-error
-    throw reason === undefined
-      ? new DOMException('This operation was aborted', 'AbortError')
-      : reason
+    throw abortReason(signal)
   }
+}
+
+/**
+ * What an aborted `signal` should be reported as.
+ *
+ * Spec-faithful: `throwIfAborted` throws `reason` verbatim, and `reason` is
+ * whatever the caller passed to abort() — `controller.abort('too slow')` makes
+ * it a string. Coercing it to an Error here would hide that from a consumer who
+ * set it deliberately.
+ *
+ * Separate from the throw so a caller that has to *reject* with it rather than
+ * throw it reports cancellation identically; see `SharedReadCache.settleFor`.
+ *
+ * Annotated `unknown` rather than inferred, because the inference narrows to
+ * something only-throw-error rejects and this value is thrown.
+ */
+export function abortReason(signal: AbortSignal): unknown {
+  const reason: unknown = signal.reason
+  return reason === undefined
+    ? new DOMException('This operation was aborted', 'AbortError')
+    : reason
 }

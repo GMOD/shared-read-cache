@@ -31,8 +31,8 @@ real and common shape, the memo whose fill is a closure passed per `get()` call.
 The value for `key`, reading it if nothing has. Callers arriving while the read
 is in flight join it rather than starting a second one, and each is told about
 its own cancellation alone. Rejects immediately if `signal` has already aborted,
-and again after the read settles if it aborted meanwhile — see
-[dataflow.md](dataflow.md).
+and as soon as it aborts while the read is in flight — the read itself runs on
+for whoever still wants it. See [dataflow.md](dataflow.md).
 
 `fill` overrides the constructor's for this call, for a read that is a closure
 over the thing being read rather than a function of the key. A rejection is

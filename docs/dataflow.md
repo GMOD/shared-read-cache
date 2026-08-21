@@ -61,6 +61,17 @@ Only the last waiter's abort reaches the read: the listener removes its signal
 from the set, and aborts the entry's controller only if the set is now empty and
 nothing pinned it.
 
+Every waiter's abort reaches that waiter, though, and does so at once rather
+than when the read it joined lands. The two are separate on purpose: sharing
+means one caller's abort does not stop the read, so a caller told about its own
+cancellation only once the shared promise settled waited out however long the
+_other_ callers' read took — and against a transport that ignores its signal, a
+stalled fetch on a dead connection, it was never told at all. So `get()` races
+the shared read against its own caller's signal, unsubscribing whichever way
+that goes. A caller with a duck-typed signal cannot be raced and falls back to
+the check after the read settles, which is all an unsubscribable signal could
+ever have asked for.
+
 ## The doomed-entry branch
 
 A read every caller has abandoned has aborted its controller but has not
