@@ -606,7 +606,7 @@ export class SharedReadCache<K, V> implements BudgetMember {
       // counted, and the next caller starts over. A value the cache cannot
       // weigh is a value it cannot hold against a budget.
       promise: run(controller.signal).then(value => {
-        entry.size = this.sizeOf(value)
+        entry.size = this.weigh(value)
         return value
       }),
       signals: new Set(),
@@ -673,6 +673,30 @@ export class SharedReadCache<K, V> implements BudgetMember {
       },
     )
     return entry
+  }
+
+  /**
+   * {@link SharedReadCacheOptions.sizeOf}, checked. A weight has to be a
+   * non-negative finite number or the budget it is summed into stops meaning
+   * anything, and `NaN` is the reachable case: `v => v.byteLength` over a value
+   * that has no `byteLength` returns `undefined`, and arithmetic makes that
+   * `NaN` rather than an error. One of those poisons `total` permanently —
+   * `total <= limit` is then false forever, so every settle evicts down to the
+   * last entry and the cache silently stops caching. Measured at five entries
+   * against a `maxSize` of 100 collapsing to one.
+   *
+   * Thrown rather than corrected, for the same reason a `sizeOf` that throws is
+   * left to fail its read: guessing a weight for a value the consumer could not
+   * weigh would bound nothing and hide the bug.
+   */
+  private weigh(value: V) {
+    const size = this.sizeOf(value)
+    if (!Number.isFinite(size) || size < 0) {
+      throw new TypeError(
+        `sizeOf returned ${String(size)}, which cannot be weighed against a budget`,
+      )
+    }
+    return size
   }
 
   // Register a caller's interest, so the read survives until that caller has

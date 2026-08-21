@@ -1345,3 +1345,32 @@ test('clear() leaves no in-flight read deferring the next batch', async () => {
   }
   expect(cache.totalSize).toBeLessThanOrEqual(2)
 })
+
+// The reachable half of the sizeOf problem, and the quiet one. A `sizeOf` that
+// throws fails its read loudly; one that returns NaN -- `v => v.byteLength` over
+// a value that has no byteLength, since that is `undefined` and arithmetic makes
+// it NaN rather than an error -- used to be absorbed into `total`, where it is
+// permanent: `total <= limit` is false forever after, so every settle evicts
+// down to the last entry and the cache silently stops caching.
+test('a size that is not a weight fails the read rather than poisoning the budget', async () => {
+  const cache = new SharedReadCache<string, string>({
+    maxSize: 100,
+    fill: key => Promise.resolve(key),
+    sizeOf: () => NaN,
+  })
+
+  await expect(cache.get('a')).rejects.toThrow(TypeError)
+  expect(cache.totalSize).toBe(0)
+  expect(cache.size).toBe(0)
+})
+
+test('a negative size fails the read too', async () => {
+  const cache = new SharedReadCache<string, string>({
+    maxSize: 100,
+    fill: key => Promise.resolve(key),
+    sizeOf: () => -1,
+  })
+
+  await expect(cache.get('a')).rejects.toThrow(TypeError)
+  expect(cache.totalSize).toBe(0)
+})
