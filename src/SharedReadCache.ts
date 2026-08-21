@@ -582,7 +582,23 @@ export class SharedReadCache<K, V> implements BudgetMember {
     }
     const controller = new AbortController()
     const entry: Entry<V> = {
-      promise: run(controller.signal),
+      // Weighed here, inside the entry's own promise, rather than in a handler
+      // hanging off it. `sizeOf` is consumer code running on consumer values —
+      // `v => v.byteLength` over a `V` that can be undefined is the obvious way
+      // to reach it — and thrown from that handler it rejected a promise
+      // nothing was holding, which is Node's `unhandledRejection` and so, since
+      // v15, the end of the process. The caller that triggered it meanwhile
+      // watched its own read succeed.
+      //
+      // On the entry's promise it fails that read instead, which is a thing
+      // this class already knows how to do: the rejection path drops the key
+      // before marking the entry settled, so nothing is charged, nothing is
+      // counted, and the next caller starts over. A value the cache cannot
+      // weigh is a value it cannot hold against a budget.
+      promise: run(controller.signal).then(value => {
+        entry.size = this.sizeOf(value)
+        return value
+      }),
       signals: new Set(),
       pinned: false,
       controller,
@@ -606,7 +622,7 @@ export class SharedReadCache<K, V> implements BudgetMember {
     // `.then(f, g)` rather than `.finally(f)` so the handler's own promise never
     // carries an unhandled rejection.
     void entry.promise.then(
-      value => {
+      () => {
         settle()
         // a later read may have replaced this key while this one was in
         // flight; charging its weight to that entry would double-count
@@ -626,7 +642,6 @@ export class SharedReadCache<K, V> implements BudgetMember {
           // budget should be retaining.
           entry.lastTouched = Date.now()
           this.settledCount++
-          entry.size = this.sizeOf(value)
           this.total += entry.size
           this.charge(entry.size)
           // the first thing the sweep could actually reclaim, so this is where

@@ -1165,3 +1165,50 @@ test('a duck-typed signal still gets its read while one is in flight', async () 
 
   await expect(p).resolves.toBe('data')
 })
+
+// sizeOf is consumer code running on consumer values, so it can throw --
+// `v => v.byteLength` over a `V` that can be undefined is the obvious way. It
+// used to throw inside a handler hanging off the entry's promise, rejecting
+// something nothing was holding: an unhandledRejection, which Node has treated
+// as fatal since v15, while the caller that triggered it watched its own read
+// succeed. A value the cache cannot weigh has to fail the read instead.
+test('a value sizeOf cannot weigh fails the read rather than the process', async () => {
+  const unhandled = vi.fn()
+  process.on('unhandledRejection', unhandled)
+
+  const cache = new SharedReadCache<string, string | undefined>({
+    maxSize: 10,
+    fill: () => Promise.resolve(undefined),
+    sizeOf: value => value!.length,
+  })
+
+  await expect(cache.get('a')).rejects.toThrow(TypeError)
+  await tick()
+
+  expect(unhandled).not.toHaveBeenCalled()
+  process.off('unhandledRejection', unhandled)
+})
+
+test('a value sizeOf cannot weigh is not cached, and does not poison the key', async () => {
+  let weighable = false
+  const cache = new SharedReadCache<string, string>({
+    maxSize: 10,
+    fill: key => Promise.resolve(key),
+    sizeOf: value => {
+      if (!weighable) {
+        throw new Error('unweighable')
+      }
+      return value.length
+    },
+  })
+
+  await expect(cache.get('a')).rejects.toThrow('unweighable')
+  await tick()
+  // dropped exactly as a failed read is, so nothing unaccounted is retained
+  expect(cache.size).toBe(0)
+  expect(cache.totalSize).toBe(0)
+
+  weighable = true
+  await expect(cache.get('a')).resolves.toBe('a')
+  expect(cache.totalSize).toBe(1)
+})
