@@ -21,6 +21,10 @@ const cache = new SharedReadCache({
 const data = await cache.get(chunk, opts.signal)
 ```
 
+This caches what a read produced. For the bytes underneath it,
+[`@gmod/range-cache-filehandle`](https://github.com/GMOD/range-cache-filehandle)
+does the same job one layer down, over HTTP range requests.
+
 ## Docs
 
 - [docs/dataflow.md](docs/dataflow.md) — how one `get()` flows, with a diagram:
