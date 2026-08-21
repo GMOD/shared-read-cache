@@ -1,3 +1,13 @@
+## [1.7.2](https://github.com/GMOD/shared-read-cache/compare/v1.7.1...v1.7.2) (2026-08-21)
+
+### Bug Fixes
+
+- An unweighable value is served to its caller, not failed ([5f16791](https://github.com/GMOD/shared-read-cache/commit/5f167919ae4250dacbbb7a457a2a729de87539a8))
+
+### Documentation
+
+- Point remote readers at @gmod/range-cache-filehandle ([952f0d4](https://github.com/GMOD/shared-read-cache/commit/952f0d4bbefb8f335dbd39f199e9b467e8b60ffc))
+
 ## [1.7.1](https://github.com/GMOD/shared-read-cache/compare/v1.7.0...v1.7.1) (2026-08-21)
 
 ### Bug Fixes
