@@ -1166,53 +1166,6 @@ test('a duck-typed signal still gets its read while one is in flight', async () 
   await expect(p).resolves.toBe('data')
 })
 
-// sizeOf is consumer code running on consumer values, so it can throw --
-// `v => v.byteLength` over a `V` that can be undefined is the obvious way. It
-// used to throw inside a handler hanging off the entry's promise, rejecting
-// something nothing was holding: an unhandledRejection, which Node has treated
-// as fatal since v15, while the caller that triggered it watched its own read
-// succeed. A value the cache cannot weigh has to fail the read instead.
-test('a value sizeOf cannot weigh fails the read rather than the process', async () => {
-  const unhandled = vi.fn()
-  process.on('unhandledRejection', unhandled)
-
-  const cache = new SharedReadCache<string, string | undefined>({
-    maxSize: 10,
-    fill: () => Promise.resolve(undefined),
-    sizeOf: value => value!.length,
-  })
-
-  await expect(cache.get('a')).rejects.toThrow(TypeError)
-  await tick()
-
-  expect(unhandled).not.toHaveBeenCalled()
-  process.off('unhandledRejection', unhandled)
-})
-
-test('a value sizeOf cannot weigh is not cached, and does not poison the key', async () => {
-  let weighable = false
-  const cache = new SharedReadCache<string, string>({
-    maxSize: 10,
-    fill: key => Promise.resolve(key),
-    sizeOf: value => {
-      if (!weighable) {
-        throw new Error('unweighable')
-      }
-      return value.length
-    },
-  })
-
-  await expect(cache.get('a')).rejects.toThrow('unweighable')
-  await tick()
-  // dropped exactly as a failed read is, so nothing unaccounted is retained
-  expect(cache.size).toBe(0)
-  expect(cache.totalSize).toBe(0)
-
-  weighable = true
-  await expect(cache.get('a')).resolves.toBe('a')
-  expect(cache.totalSize).toBe(1)
-})
-
 // The batch mark is advanced by a batch ENDING, which is a read settling with
 // none left in flight -- not by any eviction pass that happens to run. Advanced
 // down in evict(), the maxSize setter ended a batch still in flight: its
@@ -1346,35 +1299,6 @@ test('clear() leaves no in-flight read deferring the next batch', async () => {
   expect(cache.totalSize).toBeLessThanOrEqual(2)
 })
 
-// The reachable half of the sizeOf problem, and the quiet one. A `sizeOf` that
-// throws fails its read loudly; one that returns NaN -- `v => v.byteLength` over
-// a value that has no byteLength, since that is `undefined` and arithmetic makes
-// it NaN rather than an error -- used to be absorbed into `total`, where it is
-// permanent: `total <= limit` is false forever after, so every settle evicts
-// down to the last entry and the cache silently stops caching.
-test('a size that is not a weight fails the read rather than poisoning the budget', async () => {
-  const cache = new SharedReadCache<string, string>({
-    maxSize: 100,
-    fill: key => Promise.resolve(key),
-    sizeOf: () => NaN,
-  })
-
-  await expect(cache.get('a')).rejects.toThrow(TypeError)
-  expect(cache.totalSize).toBe(0)
-  expect(cache.size).toBe(0)
-})
-
-test('a negative size fails the read too', async () => {
-  const cache = new SharedReadCache<string, string>({
-    maxSize: 100,
-    fill: key => Promise.resolve(key),
-    sizeOf: () => -1,
-  })
-
-  await expect(cache.get('a')).rejects.toThrow(TypeError)
-  expect(cache.totalSize).toBe(0)
-})
-
 // get() starts a fresh read for a doomed entry and getIfCached() answers
 // undefined for one, so has() saying `true` made three lookups disagree about
 // one key. It does not drop the entry the way those two do: this is the one
@@ -1391,4 +1315,77 @@ test('has() agrees with the other lookups about an abandoned read', async () => 
 
   expect(cache.has('k')).toBe(false)
   expect(cache.getIfCached('k')).toBeUndefined()
+})
+
+// sizeOf is consumer code over consumer values, so it can fail to answer with a
+// weight: `v => v.byteLength` throws on a null value, and on a value without the
+// field returns undefined, which arithmetic turns into NaN rather than an error.
+//
+// The read itself succeeded and the caller already has its value, so the read is
+// not failed -- only the caching is. What must not happen is the two things that
+// did: a throw here rejected a promise nothing held, which is unhandledRejection
+// and so the end of the process; and NaN in `total` is permanent, since
+// `total <= limit` is false forever after, so every settle evicts down to the
+// last entry and the cache quietly stops caching.
+test.each([
+  [
+    'throws',
+    () => {
+      throw new Error('unweighable')
+    },
+  ],
+  ['returns NaN', () => NaN],
+  ['returns a negative weight', () => -1],
+  ['returns Infinity', () => Infinity],
+])('a value sizeOf %s is served but not kept', async (_label, sizeOf) => {
+  const unhandled = vi.fn()
+  process.on('unhandledRejection', unhandled)
+  const cache = new SharedReadCache<string, string>({
+    maxSize: 100,
+    fill: key => Promise.resolve(key),
+    sizeOf,
+  })
+
+  // the caller is not denied a read that worked
+  await expect(cache.get('a')).resolves.toBe('a')
+  await tick()
+
+  expect(unhandled).not.toHaveBeenCalled()
+  // and nothing the budget cannot see is retained
+  expect(cache.size).toBe(0)
+  expect(cache.totalSize).toBe(0)
+  process.off('unhandledRejection', unhandled)
+})
+
+test('an unweighable value does not poison the key', async () => {
+  let weighable = false
+  const cache = new SharedReadCache<string, string>({
+    maxSize: 100,
+    fill: key => Promise.resolve(key),
+    sizeOf: value => (weighable ? value.length : NaN),
+  })
+
+  await expect(cache.get('a')).resolves.toBe('a')
+  weighable = true
+  await expect(cache.get('a')).resolves.toBe('a')
+  expect(cache.totalSize).toBe(1)
+})
+
+// The accounting has to be settled by the time the promise the fill returned
+// resolves. Weighing inside a chain off that promise pushed it a microtask
+// later, so a consumer awaiting its own fill and reading totalSize saw the read
+// it had just awaited missing -- and getIfCached handed back the chained promise
+// rather than the one the fill returned. @gmod/cram caught both.
+test('the cached promise is the one the fill returned, and is weighed by then', async () => {
+  const cache = new SharedReadCache<string, string[]>({
+    maxSize: 100,
+    sizeOf: value => value.length,
+  })
+
+  const read = Promise.resolve(['x', 'y', 'z'])
+  void cache.get('a', undefined, () => read).catch(() => undefined)
+  await read
+
+  expect(cache.getIfCached('a')).toBe(read)
+  expect(cache.totalSize).toBe(3)
 })

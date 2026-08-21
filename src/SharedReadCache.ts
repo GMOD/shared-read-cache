@@ -598,23 +598,7 @@ export class SharedReadCache<K, V> implements BudgetMember {
     }
     const controller = new AbortController()
     const entry: Entry<V> = {
-      // Weighed here, inside the entry's own promise, rather than in a handler
-      // hanging off it. `sizeOf` is consumer code running on consumer values —
-      // `v => v.byteLength` over a `V` that can be undefined is the obvious way
-      // to reach it — and thrown from that handler it rejected a promise
-      // nothing was holding, which is Node's `unhandledRejection` and so, since
-      // v15, the end of the process. The caller that triggered it meanwhile
-      // watched its own read succeed.
-      //
-      // On the entry's promise it fails that read instead, which is a thing
-      // this class already knows how to do: the rejection path drops the key
-      // before marking the entry settled, so nothing is charged, nothing is
-      // counted, and the next caller starts over. A value the cache cannot
-      // weigh is a value it cannot hold against a budget.
-      promise: run(controller.signal).then(value => {
-        entry.size = this.weigh(value)
-        return value
-      }),
+      promise: run(controller.signal),
       signals: new Set(),
       pinned: false,
       controller,
@@ -639,31 +623,41 @@ export class SharedReadCache<K, V> implements BudgetMember {
     // `.then(f, g)` rather than `.finally(f)` so the handler's own promise never
     // carries an unhandled rejection.
     void entry.promise.then(
-      () => {
+      value => {
         settle()
         // a later read may have replaced this key while this one was in
         // flight; charging its weight to that entry would double-count
         if (this.entries.get(cacheKey) === entry) {
-          // The idle clock starts when the value exists, not when the read for
-          // it began. Stamped only at start(), an entry lost its whole fill
-          // duration out of its idle budget — and one whose fill outran
-          // idleTimeoutMs arrived already expired, swept on the very next tick,
-          // so the query that paid for that read never got a single hit off it.
-          //
-          // Deliberately not a touch(). "How long since" and "which came first"
-          // are different questions, and only the first one is about the value
-          // existing: a read's *latency* is a property of the transport, not of
-          // how the consumer is using the cache, so ordering evictions by it
-          // preferentially keeps whatever was slowest to arrive. In @gmod/tabix
-          // that is the largest chunk in the query, which is the last thing a
-          // budget should be retaining.
-          entry.lastTouched = Date.now()
-          this.settledCount++
-          this.total += entry.size
-          this.charge(entry.size)
-          // the first thing the sweep could actually reclaim, so this is where
-          // the timer belongs — see startSweep
-          this.startSweep()
+          const size = this.weigh(value)
+          if (size === undefined) {
+            // Not deleteKey: that credits back a settled entry, and this one
+            // was never counted as one. Dropped rather than kept at zero, so
+            // nothing the budget cannot see is retained.
+            this.entries.delete(cacheKey)
+          } else {
+            // The idle clock starts when the value exists, not when the read
+            // for it began. Stamped only at start(), an entry lost its whole
+            // fill duration out of its idle budget — and one whose fill outran
+            // idleTimeoutMs arrived already expired, swept on the very next
+            // tick, so the query that paid for that read never got a single hit
+            // off it.
+            //
+            // Deliberately not a touch(). "How long since" and "which came
+            // first" are different questions, and only the first is about the
+            // value existing: a read's *latency* is a property of the
+            // transport, not of how the consumer is using the cache, so
+            // ordering evictions by it preferentially keeps whatever was
+            // slowest to arrive. In @gmod/tabix that is the largest chunk in
+            // the query, which is the last thing a budget should retain.
+            entry.lastTouched = Date.now()
+            this.settledCount++
+            entry.size = size
+            this.total += size
+            this.charge(size)
+            // the first thing the sweep could actually reclaim, so this is
+            // where the timer belongs — see startSweep
+            this.startSweep()
+          }
         }
         this.maybeEvict()
       },
@@ -682,27 +676,36 @@ export class SharedReadCache<K, V> implements BudgetMember {
   }
 
   /**
-   * {@link SharedReadCacheOptions.sizeOf}, checked. A weight has to be a
-   * non-negative finite number or the budget it is summed into stops meaning
-   * anything, and `NaN` is the reachable case: `v => v.byteLength` over a value
-   * that has no `byteLength` returns `undefined`, and arithmetic makes that
-   * `NaN` rather than an error. One of those poisons `total` permanently —
-   * `total <= limit` is then false forever, so every settle evicts down to the
-   * last entry and the cache silently stops caching. Measured at five entries
-   * against a `maxSize` of 100 collapsing to one.
+   * {@link SharedReadCacheOptions.sizeOf}, checked — `undefined` when it does
+   * not answer with a weight, which drops the entry rather than keeping one the
+   * budget cannot see.
    *
-   * Thrown rather than corrected, for the same reason a `sizeOf` that throws is
-   * left to fail its read: guessing a weight for a value the consumer could not
-   * weigh would bound nothing and hide the bug.
+   * It has to be checked because it is consumer code over consumer values.
+   * `v => v.byteLength` throws on a null value and returns `undefined` on a
+   * value without the field, and arithmetic turns the latter into `NaN` rather
+   * than an error. `NaN` in `total` is permanent: `total <= limit` is false
+   * forever after, so every settle evicts down to the last entry and the cache
+   * silently stops caching. Measured at five entries against a `maxSize` of 100
+   * collapsing to one.
+   *
+   * Swallowed rather than rethrown, which is the part worth defending. Thrown
+   * from here it would reject a promise nothing holds — `unhandledRejection`,
+   * and so the end of the process. Carried into the entry's own promise it
+   * would fail the read for its callers, and that was tried: it made
+   * `getIfCached` hand back a chained promise rather than the one the fill
+   * returned, and pushed this bookkeeping a microtask later than the fill's own
+   * promise, so a consumer awaiting that and reading `totalSize` saw the last
+   * read missing. @gmod/cram caught both. Neither is a price worth paying to
+   * report a bug in a caller's `sizeOf`, when the read itself succeeded and the
+   * caller already has its value — so the value is served and simply not kept.
    */
   private weigh(value: V) {
-    const size = this.sizeOf(value)
-    if (!Number.isFinite(size) || size < 0) {
-      throw new TypeError(
-        `sizeOf returned ${String(size)}, which cannot be weighed against a budget`,
-      )
+    try {
+      const size = this.sizeOf(value)
+      return Number.isFinite(size) && size >= 0 ? size : undefined
+    } catch {
+      return undefined
     }
-    return size
   }
 
   // Register a caller's interest, so the read survives until that caller has
