@@ -26,7 +26,16 @@ jobs:
       # or a changed signature and go on passing by testing nothing.
       - run: pnpm typecheck
       - run: pnpm build
+      # SharedBudget holds its members weakly, and the branch that credits back
+      # what a collected one still owed cannot be reached without making a
+      # collection actually happen. vitest 4 has no config for a worker's node
+      # flags -- poolOptions was removed -- and putting the flag in the `test`
+      # script would make it fail on a shell without `VAR=x cmd`, so it goes
+      # here. Those tests skip themselves when the flag is absent, which is what
+      # a plain `pnpm test` does locally.
       - run: pnpm test --run
+        env:
+          NODE_OPTIONS: --expose-gc
 
   publish:
     name: Publish to npm
