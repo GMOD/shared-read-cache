@@ -450,7 +450,13 @@ export class SharedReadCache<K, V> implements BudgetMember {
   }
 
   has(key: K) {
-    return this.entries.has(this.toCacheKey(key))
+    const entry = this.entries.get(this.toCacheKey(key))
+    // A read every caller has abandoned is not a cached value, so `has` says so
+    // — {@link get} would start a fresh read for it and {@link getIfCached}
+    // would answer `undefined`, and three lookups disagreeing about one key is
+    // no use to anyone. Unlike those two this does not drop the entry, because
+    // this is the one lookup that leaves the cache alone.
+    return entry !== undefined && !this.isDoomed(entry)
   }
 
   delete(key: K) {

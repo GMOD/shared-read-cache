@@ -1374,3 +1374,21 @@ test('a negative size fails the read too', async () => {
   await expect(cache.get('a')).rejects.toThrow(TypeError)
   expect(cache.totalSize).toBe(0)
 })
+
+// get() starts a fresh read for a doomed entry and getIfCached() answers
+// undefined for one, so has() saying `true` made three lookups disagree about
+// one key. It does not drop the entry the way those two do: this is the one
+// lookup that leaves the cache alone, and that stays true.
+test('has() agrees with the other lookups about an abandoned read', async () => {
+  const { fill, firstStarted } = parkedFill('data', { honourAbort: false })
+  const cache = new SharedReadCache<string, string>({ fill })
+
+  const controller = new AbortController()
+  const p = cache.get('k', controller.signal)
+  await firstStarted
+  controller.abort()
+  await expect(p).rejects.toThrow(/aborted/i)
+
+  expect(cache.has('k')).toBe(false)
+  expect(cache.getIfCached('k')).toBeUndefined()
+})
