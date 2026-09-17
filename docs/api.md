@@ -13,14 +13,14 @@ read returns. `cacheKey` maps the first to a string; `sizeOf` weighs the second.
 
 ## `new SharedReadCache(options?)`
 
-Every option is optional, and so is the object — `new SharedReadCache({})` is a
-real and common shape, the memo whose fill is a closure passed per `get()` call.
+Every option is optional, and so is the object. `new SharedReadCache({})` is
+common: a memo whose fill is a closure passed per `get()` call.
 
 | option              | default       | what it does                                                                                                                                                                                                                                                                                                                                               |
 | ------------------- | ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `fill(key, signal)` | none          | Performs the read, under the **shared** signal — it fires only once every caller waiting on this key has aborted, never one caller's own. Either this or a per-call `fill` must be present.                                                                                                                                                                |
 | `cacheKey(key)`     | `String(key)` | Maps a key to its cache key.                                                                                                                                                                                                                                                                                                                               |
-| `sizeOf(value)`     | `() => 1`     | Weighs a settled value against the budget. The default makes the budget an entry count. A value it cannot weigh — a throw, `NaN`, a negative — is served to the caller as normal but not cached, since the budget could not account for it. See [memory.md](memory.md#sizeof-is-the-point), and [consumers.md](consumers.md) for what each package weighs. |
+| `sizeOf(value)`     | `() => 1`     | Weighs a settled value against the budget. The default makes the budget an entry count. A value it cannot weigh — a throw, `NaN`, a negative — is served to the caller as normal but not cached, since the budget could not account for it. See [memory.md](memory.md#why-sizeof), and [consumers.md](consumers.md) for what each package weighs. |
 | `maxSize`           | `Infinity`    | Budget, in whatever unit `sizeOf` returns.                                                                                                                                                                                                                                                                                                                 |
 | `idleTimeoutMs`     | none          | Drop an entry once nothing has asked for it for this long.                                                                                                                                                                                                                                                                                                 |
 | `evictionPolicy`    | `'lru'`       | `'lru'` evicts as each read settles; `'batch'` waits until no read anyone is still waiting on is in flight, then spares everything that batch touched. [Try a bigger `maxSize` first.](memory.md#evictionpolicy-batch--try-a-bigger-maxsize-first)                                                                                                         |
@@ -35,14 +35,14 @@ and as soon as it aborts while the read is in flight — the read itself runs on
 for whoever still wants it. See [dataflow.md](dataflow.md).
 
 `fill` overrides the constructor's for this call, for a read that is a closure
-over the thing being read rather than a function of the key. A rejection is
-dropped rather than cached, so the next caller starts over.
+over the thing being read rather than a function of the key. The cache drops a
+rejection rather than caching it, so the next caller starts over.
 
 ### `getIfCached(key)`
 
 The promise under `key`, or `undefined` if there is none. Marks the entry
-most-recently-used exactly as `get()` does: this is a lookup that happens not to
-start a read, not an inspection.
+most-recently-used exactly as `get()` does. It doesn't start a read, but it
+isn't a passive inspection either — it still touches LRU order.
 
 The promise is the shared one, so awaiting it neither registers the caller as a
 waiter nor re-reports the rejection per caller. `undefined` too for a read every
@@ -75,7 +75,7 @@ rather than waiting for the next read.
 
 How many caller signals the entry is still holding. Exposed for tests: an entry
 that has leaked a thousand stale signals answers every read exactly like one
-that has not, so nothing else would notice.
+that has not, so only this accessor would catch it.
 
 ## `new SharedBudget(limit)`
 
@@ -107,8 +107,8 @@ consumers doing the same check want the same semantics.
 Not `signal.throwIfAborted()`, for two reasons. It assumes a _real_
 `AbortSignal`, and consumers hand-roll duck-typed ones — a missing method there
 is a `TypeError` rather than the cancellation the caller asked for, which is a
-strictly worse failure. And it sets a browser floor of March 2022 (Safari 15.4 /
-Chrome 100 / Firefox 97) that consumers of this package otherwise do not need:
+strictly worse failure. It also sets a browser floor of March 2022 (Safari 15.4
+/ Chrome 100 / Firefox 97) that consumers of this package otherwise do not need:
 they touch only `.aborted`.
 
 ## `BudgetMember`

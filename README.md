@@ -43,7 +43,7 @@ underneath a filehandle.
 ## Budgets are opt-in
 
 There is no default limit. What a sensible one is depends entirely on what you
-are caching, so the package does not prescribe one:
+are caching:
 
 ```js
 const cache = new SharedReadCache({
@@ -81,12 +81,11 @@ const cache = new SharedReadCache({
 })
 ```
 
-The two answer different questions, and they work best together. `maxSize` wants
-to be **generous**: set below one request's working set it does not cache less,
-it caches _nothing_ — each value falls out before the next request can reuse it,
-while the ones in flight hold their memory anyway. `idleTimeoutMs` is what makes
-a generous ceiling affordable, by turning it into a peak rather than a resting
-level.
+`maxSize` and `idleTimeoutMs` answer different questions, and they work best
+together. Set `maxSize` generously: below one request's working set, it caches
+_nothing_ — each value falls out before the next request can reuse it, while the
+ones in flight hold their memory anyway. `idleTimeoutMs` makes a generous
+ceiling affordable by turning it into a peak, not a resting level.
 
 The clock runs from the last **read** of an entry, or from its fill settling if
 nothing has read it since, so something fetched once and used every second never
@@ -102,8 +101,8 @@ so it will never hold a Node process open.
 
 ## One budget across several caches
 
-A per-cache ceiling is not a bound on a consumer that scales the number of
-caches — one cache per open file, sized so that a single one never thrashes,
+A per-cache ceiling does not bound a consumer that opens many caches: one cache
+per open file, each sized so a single one never thrashes, and the count
 multiplies. `SharedBudget` bounds them in aggregate, evicting whatever is
 globally least-recently-used, so an idle cache hands its space to a busy one:
 
@@ -118,12 +117,12 @@ unit — a budget adding one cache's bytes to another's record counts bounds
 neither. [docs/memory.md](docs/memory.md) has what dividing a ceiling by the
 file count measured instead.
 
-## `sizeOf` is the point
+## Why `sizeOf`
 
 This package exists because four gmod packages each hand-rolled the same cache,
 identical except for how they weighed an entry: `@gmod/bam` and `@gmod/tabix`
 weigh decompressed bytes, `@gmod/bbi` weighs entries, `@gmod/cram` weighs
-decoded records. Nothing can weigh a value until its read settles, so a cache
+decoded records. The cache cannot call `sizeOf` until a read settles, so a cache
 that budgets this way has to own its entries — which is why a plain-LRU-backed
 package could not serve them and each wrote its own.
 
@@ -131,15 +130,16 @@ Omit `sizeOf` and the budget counts entries.
 
 ## Behaviour worth knowing
 
-- **A caller with no signal pins the read.** It cannot give up, so no set of
-  aborts should stop the read it joined. One signal-free consumer therefore
-  makes that read uncancellable for everyone joined to it.
-- **A rejection drops rather than caching**, so one transient failure does not
-  poison the key for the life of the cache.
-- **The last settled entry survives any budget.** A value larger than the whole
-  budget is still worth holding; dropping it only buys an immediate re-read.
-- **Eviction never touches a read in flight.** It is not a result yet, and
-  dropping one loses the de-duplication its callers are relying on.
+- A caller with no signal pins the read: with no signal, it can never abort, so
+  aborting every other caller still doesn't stop the read. One signal-free
+  consumer therefore makes that read uncancellable for everyone joined to it.
+- The cache drops a rejection rather than caching it, so one transient failure
+  does not poison the key for the life of the cache.
+- The last settled entry survives any budget. A value larger than the whole
+  budget is still worth holding; dropping it only costs an immediate re-read.
+- Eviction never touches a read in flight, because it is still a promise, not a
+  settled result, and dropping it would lose the de-duplication its callers rely
+  on.
 
 ## Relationship to `@gmod/abortable-promise-cache`
 

@@ -9,8 +9,8 @@ A `get()` maps the key through `cacheKey`, and either joins the entry already
 under that key or starts one. Either way the caller ends up awaiting **one**
 promise per key — the read runs under an `AbortController` the entry owns, not
 under any caller's signal, and the caller's own signal is checked on the way in
-and again when the read settles. That separation is the whole package: a caller
-that gives up is told it gave up, and everyone else keeps the read.
+and again when the read settles. That separation is why the package exists: a
+caller that gives up is told it gave up, and everyone else keeps the read.
 
 Only two things about a key are per-caller: whether _this_ caller aborted, and
 whether its abort was the last one. Everything else — the promise, the value,
@@ -28,10 +28,9 @@ the listener was added. The waiter count could then never reach zero, so the
 read turned uncancellable for everyone joined to it.
 
 The second check is after the shared promise settles, on both the resolve and
-the reject path. It reports this caller's own cancellation in preference to
-whatever the shared read said: if we asked to stop, that is the answer we want,
-and when the read itself was cancelled it is because we and everyone else asked
-it to.
+the reject path. It reports this caller's own cancellation in preference to the
+shared read's outcome: a caller that asked to stop is told it stopped, and if
+the read itself was cancelled, that is because every joined caller asked for it.
 
 ## What `join` does with a signal
 
@@ -42,17 +41,16 @@ it to.
   `{ once: true, signal: entry.dispose.signal }`, so it comes off whether the
   abort fires or the entry settles. Without that second half, a long-lived
   signal accumulates one listener per key it ever touches.
-- **no signal** — the entry is _pinned_. A caller that never asked to be
-  cancellable cannot give up, so no set of aborts should stop the read it
-  joined. One signal-free consumer therefore makes that read uncancellable for
-  everyone joined to it.
+- **no signal** — the entry is _pinned_. A caller with no signal can never
+  abort, so aborting every other caller still doesn't stop the read it joined.
+  One signal-free consumer therefore makes that read uncancellable for everyone
+  joined to it.
 - **a duck-typed signal with no `addEventListener`** — pinned too, for the same
-  reason: nothing here can learn when such a caller gave up. It is still told
-  about its own cancellation when the read settles; what it loses is only the
-  ability to stop the read early, which an unsubscribable signal cannot ask for
-  anyway. Consumers really do hand-roll `{ aborted: false }` — `@gmod/bam`'s
-  `test/csi.test.ts` is one — and subscribing to it used to be a `TypeError`
-  instead of a read.
+  reason: the cache has no way to detect when such a caller aborts. It is still
+  told about its own cancellation when the read settles; what it loses is only
+  the ability to stop the read early, which an unsubscribable signal does not
+  support anyway. Consumers really do hand-roll `{ aborted: false }` —
+  `@gmod/bam`'s `test/csi.test.ts` is one.
 - **an already-aborted signal** — not a waiter (see above). Unreachable today,
   because `get()` rejects such a caller before `join` sees it, with no `await`
   in between.
@@ -82,21 +80,21 @@ read, `getIfCached()` drops it and answers `undefined`.
 
 ## What settling does
 
-A resolved read is weighed with `sizeOf`, and that weight is added to the
-cache's total and charged to the [shared budget](memory.md) if there is one. The
+Settling weighs a resolved read with `sizeOf`, adds that weight to the cache's
+total, and charges it to the [shared budget](memory.md) if there is one. The
 entry's idle clock starts here rather than at `start()` — the clock is about the
 value existing, so a read slower than `idleTimeoutMs` would otherwise arrive
-already expired and be swept before the query that paid for it got a single hit.
-Settling also drops the entry's abort listeners and clears its waiter set, which
-is why `get()` does not `join` an entry that has already settled: nothing would
-ever take the caller back out.
+already expired and be swept before the query that triggered it got a single
+hit. Settling also drops the entry's abort listeners and clears its waiter set,
+which is why `get()` does not `join` an entry that has already settled: no
+listener would ever take the caller back out.
 
-A **rejected** read caches nothing. The key is dropped before the entry is
-marked settled, so the next caller starts over rather than inheriting the
+A **rejected** read caches nothing. Settling drops the key before marking the
+entry settled, so the next caller starts over rather than inheriting the
 failure, and one transient error does not poison the key for the life of the
 cache.
 
-Then, and only then, eviction runs — which is [memory.md](memory.md).
+Then, and only then, eviction runs — see [memory.md](memory.md).
 
 ## What the diagram leaves out
 

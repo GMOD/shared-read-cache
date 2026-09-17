@@ -12,8 +12,9 @@ pnpm build
 pnpm version patch  # or minor/major
 ```
 
-That runs lint, format, types, tests and build, regenerates CHANGELOG.md with
-git-cliff, then pushes the tag, which triggers the publish workflow.
+`pnpm version patch` runs lint, format, types, tests and build, regenerates
+CHANGELOG.md with git-cliff, then pushes the tag, which triggers the publish
+workflow.
 
 ## Diagrams
 
@@ -25,9 +26,9 @@ dot -Tsvg docs/img/dataflow.dot -o docs/img/dataflow.svg
 dot -Tsvg docs/img/eviction.dot -o docs/img/eviction.svg
 ```
 
-Nothing checks this — graphviz is not a dependency, and different versions emit
-cosmetically different SVG, so a CI check would fail on the version rather than
-on the content.
+This isn't checked in CI — graphviz is not a dependency, and different versions
+emit cosmetically different SVG, so a CI check would fail on the version rather
+than on the content.
 
 ## Publishing
 
