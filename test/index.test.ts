@@ -647,6 +647,28 @@ test('no idle timeout means no sweeping and no timer', async () => {
   }
 })
 
+// A timer delay past 2^31-1 ms does not wait longer, it overflows: Node clamps
+// it to 1 ms, so `idleTimeoutMs: Infinity` -- the natural spelling of "never",
+// after `maxSize: Infinity` -- swept the whole cache a thousand times a second.
+test('an idle timeout too long for a timer does not become a 1ms sweep', async () => {
+  const setIntervalSpy = vi.spyOn(globalThis, 'setInterval')
+  try {
+    const never = new SharedReadCache<string, number>({
+      idleTimeoutMs: Infinity,
+    })
+    await never.get('a', undefined, () => Promise.resolve(1))
+    expect(setIntervalSpy).not.toHaveBeenCalled()
+
+    const huge = new SharedReadCache<string, number>({ idleTimeoutMs: 2 ** 40 })
+    await huge.get('a', undefined, () => Promise.resolve(1))
+    expect(setIntervalSpy).toHaveBeenCalledTimes(1)
+    expect(setIntervalSpy.mock.calls[0]![1]).toBe(2 ** 31 - 1)
+    huge.clear()
+  } finally {
+    setIntervalSpy.mockRestore()
+  }
+})
+
 test('the sweep timer stops once the cache empties, and restarts after', async () => {
   vi.useFakeTimers()
   try {

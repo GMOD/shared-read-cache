@@ -380,3 +380,27 @@ test('an idle budget does not go on counting a cache that is gone', async () => 
 
   expect(budget.total).toBe(0)
 })
+
+// A pending timer is a GC root. The idle sweep's interval used to close over
+// its cache, so a cache the consumer had dropped stayed reachable, and charged
+// to its budget, until a sweep emptied it a whole idle timeout later. jbrowse
+// measured a closed alignments track holding 296 MB for four minutes this way.
+test('a dropped cache with an idle timeout is collected, not kept by its timer', async () => {
+  const budget = new SharedBudget(1000)
+
+  await (async () => {
+    const cache = new SharedReadCache<string, string>({
+      budget,
+      idleTimeoutMs: 600_000,
+      sizeOf: () => 100,
+      fill: key => Promise.resolve(key),
+    })
+    await cache.get('a')
+  })()
+  expect(budget.total).toBe(100)
+
+  await collect()
+
+  expect(budget.total).toBe(0)
+  expect(budget.size).toBe(0)
+})

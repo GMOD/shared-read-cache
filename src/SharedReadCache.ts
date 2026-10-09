@@ -218,9 +218,12 @@ export class SharedReadCache<K, V> implements BudgetMember {
     this.membership = budget?.register(this)
     this.sizeOf = sizeOf
     this.toCacheKey = cacheKey
-    // 0, undefined and a nonsense negative all mean "no idle eviction", so the
-    // rest of the class has one thing to check rather than three
-    this.idleTimeoutMs = idleTimeoutMs > 0 ? idleTimeoutMs : undefined
+    // 0, a negative and Infinity all mean "no idle eviction", so the rest of
+    // the class has one thing to check
+    this.idleTimeoutMs =
+      idleTimeoutMs > 0 && Number.isFinite(idleTimeoutMs)
+        ? idleTimeoutMs
+        : undefined
   }
 
   /** Number of entries held, including reads still in flight. */
@@ -482,28 +485,37 @@ export class SharedReadCache<K, V> implements BudgetMember {
   }
 
   // The sweep runs on an interval because it is the one form of reclamation
-  // that has to happen when nothing is calling in — a lazy check on get() would
-  // never fire on precisely the idle consumer this exists for.
+  // that has to happen when nothing is calling in. It runs exactly when there
+  // is something it could reclaim: armed by the first read to SETTLE, stopped
+  // by the first sweep that finds no settled entry left.
   //
-  // It runs exactly when there is something it could reclaim: armed by the
-  // first read to SETTLE, stopped by the first sweep that finds no settled
-  // entry left. In-flight reads arm nothing, because the sweep would skip them
-  // anyway. That is also what makes a dispose() method unnecessary. A consumer
-  // that drops the cache without clearing it leaves one timer alive for at most
-  // a timeout plus a sweep interval, after which the sweep reclaims what it can
-  // and stops itself, and the whole thing becomes garbage.
+  // The timer holds the cache weakly, which is what makes a dispose() method
+  // unnecessary: a pending timer is a GC root, so held strongly it kept a
+  // dropped cache, and everything its fill closes over, alive until a sweep
+  // emptied it — a whole idle timeout after the consumer let go.
   private startSweep() {
     const timeout = this.idleTimeoutMs
     if (timeout === undefined || this.sweepTimer !== undefined) {
       return
     }
-    // a fraction of the timeout, so the lag between an entry going idle and
-    // being reclaimed is bounded by ~1.25x it rather than 2x
-    const interval = Math.max(1000, Math.floor(timeout / 4))
-    this.sweepTimer = setInterval(() => {
-      this.sweepIdle()
+    // A quarter of the timeout, so an idle entry is reclaimed within ~1.25x of
+    // it, but no more often than once a second. Capped at what a timer can
+    // hold: past 2^31-1 ms Node and browsers fire immediately instead.
+    const interval = Math.min(
+      2 ** 31 - 1,
+      Math.max(1000, Math.floor(timeout / 4)),
+    )
+    const ref = new WeakRef(this)
+    const timer = setInterval(() => {
+      const cache = ref.deref()
+      if (cache) {
+        cache.sweepIdle()
+      } else {
+        clearInterval(timer)
+      }
     }, interval)
-    unrefIfPossible(this.sweepTimer)
+    this.sweepTimer = timer
+    unrefIfPossible(timer)
   }
 
   private stopSweep() {
