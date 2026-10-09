@@ -17,12 +17,41 @@ export interface BudgetMember {
 }
 
 /**
- * A membership handle. The cache keeps this and reports its weight through it;
- * the budget keeps it too, so that a cache which has been collected can still
- * have its last known weight subtracted from the total.
+ * The handle a member reports its weight through. Opaque to the member: it
+ * passes back to {@link Budget.charge} the one {@link Budget.register} gave it.
  */
-class Membership {
-  /** weight this member currently contributes to {@link SharedBudget.total} */
+export interface BudgetMembership {
+  /** weight this member currently contributes to the budget's total */
+  held: number
+}
+
+/**
+ * What a {@link SharedReadCache} needs from the budget it joins, and the type
+ * of its `budget` option.
+ *
+ * An interface rather than the {@link SharedBudget} class so that the budget
+ * and the cache need not come from one copy of this package. An application
+ * creates the budget from its own install and hands it to caches constructed
+ * inside `@gmod/bam` or `@gmod/tabix` from theirs; a class with private fields
+ * is nominal, so two installs of even the same version would not typecheck
+ * against each other. Changing this interface breaks that pairing at runtime,
+ * so it is semver-major surface.
+ */
+export interface Budget {
+  register(member: BudgetMember): BudgetMembership
+  /** Adjust a member's contribution, and the total with it. */
+  charge(membership: BudgetMembership, delta: number): void
+  /** The next stamp in the recency order shared by every member. */
+  nextSeq(): number
+  /** Evict globally least-recently-used entries until back under the limit. */
+  evict(): void
+}
+
+/**
+ * The budget keeps this so that a cache which has been collected can still have
+ * its last known weight subtracted from the total.
+ */
+class Membership implements BudgetMembership {
   held = 0
   readonly ref: WeakRef<BudgetMember>
 
@@ -65,10 +94,10 @@ class Membership {
  *
  * {@link total} is a sum over members, so it means nothing unless their
  * {@link SharedReadCacheOptions.sizeOf} agree. This is not hypothetical across
- * these packages: @gmod/bam and @gmod/tabix weigh decompressed bytes, @gmod/bbi
- * weighs entries, and @gmod/cram weighs decoded *records* — because a decoded
- * record has no cheap size. A budget holding a bam cache and a cram cache would
- * be adding bytes to records and bounding neither.
+ * these packages: @gmod/bam, @gmod/tabix and @gmod/cram weigh decompressed
+ * bytes, while @gmod/bbi, @gmod/nclist and @gmod/hic weigh entries. A budget
+ * holding a bam cache and a bbi cache would be adding bytes to entries and
+ * bounding neither.
  *
  * Nothing here can check that, since `sizeOf` is opaque by design. Group
  * members by unit and give each group its own budget.
@@ -84,7 +113,7 @@ class Membership {
  * a collected member is pruned, and its weight credited back, on the next
  * eviction pass. No `unregister` call for a consumer to forget.
  */
-export class SharedBudget {
+export class SharedBudget implements Budget {
   private members = new Set<Membership>()
   private budgetLimit: number
   /**
@@ -159,7 +188,7 @@ export class SharedBudget {
    * budget never asks a member for its weight, because a member that has been
    * collected still owes what it held.
    */
-  register(member: BudgetMember) {
+  register(member: BudgetMember): BudgetMembership {
     const membership = new Membership(member)
     this.members.add(membership)
     return membership
@@ -174,7 +203,7 @@ export class SharedBudget {
   }
 
   /** Adjust a member's contribution, and the total with it. */
-  charge(membership: Membership, delta: number) {
+  charge(membership: BudgetMembership, delta: number) {
     membership.held += delta
     this.heldTotal += delta
   }
@@ -192,9 +221,6 @@ export class SharedBudget {
     // holding 400, and kept a Membership for every cache ever registered, which
     // is the accumulation the weak refs exist to avoid.
     this.prune()
-    if (this.budgetLimit === Infinity) {
-      return
-    }
     while (this.heldTotal > this.budgetLimit) {
       let victimKey: string | undefined
       let victimAt = Infinity
