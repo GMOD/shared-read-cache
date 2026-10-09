@@ -1,51 +1,39 @@
 import { abortReason, throwIfAborted } from './throwIfAborted.ts'
 
-import type { BudgetMember, SharedBudget } from './SharedBudget.ts'
+import type { Budget, BudgetMember, BudgetMembership } from './SharedBudget.ts'
 
-/**
- * Node holds the process open for a pending interval, and a library's
- * housekeeping timer must never be the reason a script fails to exit.
- *
- * Duck-typed rather than cast, because the return of `setInterval` is a
- * `Timeout` object in Node and a plain number in browsers and workers, and this
- * package is built once for both.
- */
-function unrefIfPossible(timer: unknown) {
-  if (
-    typeof timer === 'object' &&
-    timer !== null &&
-    'unref' in timer &&
-    typeof timer.unref === 'function'
-  ) {
-    timer.unref()
-  }
-}
-
-interface Entry<V> {
-  promise: Promise<V>
+/** What exists only to cancel a read, so only while it is in flight. */
+interface PendingRead {
   /**
    * The callers still waiting on this read, each with the listener the read put
    * on its signal. The read is cancelled only once every one of them has given
    * up — see {@link SharedReadCache.join}.
    */
   signals: Map<AbortSignal, () => void>
-  /** true once a caller joins without a signal, which pins the read */
+  /** true once a caller that cannot give up has joined, which pins the read */
   pinned: boolean
   /** aborts when every caller has given up; what the read actually runs under */
   controller: AbortController
-  settled: boolean
+}
+
+interface Entry<V> {
+  promise: Promise<V>
+  /**
+   * Dropped when the read settles, so `undefined` is what "settled" means and a
+   * cached value carries none of the machinery that was there to cancel it.
+   */
+  pending?: PendingRead
   /** 0 until the read settles and the value can be weighed */
   size: number
   /**
    * `Date.now()` at the last {@link SharedReadCache.get} or
-   * {@link SharedReadCache.getIfCached} that resolved to this entry.
-   * Only meaningful when {@link SharedReadCacheOptions.idleTimeoutMs} is set.
+   * {@link SharedReadCache.getIfCached} that resolved to this entry, or at its
+   * read settling if that is later. What the idle sweep measures from.
    */
   lastTouched: number
   /**
-   * This cache's budget's stamp at the same moment, for the cross-cache LRU
-   * order that budget evicts by; 0 when there is no budget, which is when
-   * nothing compares entries across caches. See {@link SharedBudget.nextSeq}.
+   * The budget's stamp at the last touch, for the cross-cache LRU order it
+   * evicts by; 0 when there is no budget. See {@link Budget.nextSeq}.
    */
   seq: number
 }
@@ -113,7 +101,7 @@ export interface SharedReadCacheOptions<K, V> {
    * thrashes is, by construction, not a bound on N of them; see
    * {@link SharedBudget} for what that measured.
    */
-  budget?: SharedBudget
+  budget?: Budget
   /**
    * Drop an entry once nothing has asked for it for this many milliseconds.
    * Defaults to no idle eviction.
@@ -191,9 +179,8 @@ export class SharedReadCache<K, V> implements BudgetMember {
    */
   private settledCount = 0
   private limit: number
-  private budget?: SharedBudget
-  /** how this cache reports its weight to {@link budget}; see SharedBudget */
-  private membership?: ReturnType<SharedBudget['register']>
+  /** the budget this cache joined, and the handle it reports its weight by */
+  private shared?: { budget: Budget; membership: BudgetMembership }
   private fill?: (key: K, signal: AbortSignal) => Promise<V>
   private sizeOf: (value: V) => number
   private toCacheKey: (key: K) => string
@@ -214,8 +201,7 @@ export class SharedReadCache<K, V> implements BudgetMember {
   }: SharedReadCacheOptions<K, V> = {}) {
     this.fill = fill
     this.limit = maxSize
-    this.budget = budget
-    this.membership = budget?.register(this)
+    this.shared = budget && { budget, membership: budget.register(this) }
     this.sizeOf = sizeOf
     this.toCacheKey = cacheKey
     // 0, a negative and Infinity all mean "no idle eviction", so the rest of
@@ -256,7 +242,7 @@ export class SharedReadCache<K, V> implements BudgetMember {
    * exactly like one that has not, so nothing else would notice.
    */
   waiterCount(key: K) {
-    return this.entries.get(this.toCacheKey(key))?.signals.size ?? 0
+    return this.entries.get(this.toCacheKey(key))?.pending?.signals.size ?? 0
   }
 
   async get(
@@ -264,80 +250,54 @@ export class SharedReadCache<K, V> implements BudgetMember {
     signal?: AbortSignal,
     fill?: (signal: AbortSignal) => Promise<V>,
   ) {
-    // Before anything else, including the cache hit. A caller can reach here
-    // with a signal that has already fired — the abort lands while some earlier
-    // await is still in flight and nothing in between looks at it. Such a
-    // caller must not start a read it has no interest in, and must not be
-    // registered as a waiter on someone else's: see join().
+    // Before the cache hit too: a caller that has already given up must not
+    // start a read, nor be registered as a waiter on someone else's.
     throwIfAborted(signal)
 
     const cacheKey = this.toCacheKey(key)
     let entry = this.entries.get(cacheKey)
-    if (entry) {
-      // A read every caller has abandoned is on its way out but may not have
-      // noticed yet. Start a fresh one rather than join one already doomed —
-      // joining it means inheriting a cancellation nothing to do with us.
-      if (this.isDoomed(entry)) {
-        this.deleteKey(cacheKey)
-        entry = undefined
-      } else {
-        this.touch(cacheKey, entry)
-      }
+    // A read every caller has abandoned is replaced rather than joined, since
+    // joining it means inheriting a cancellation that is not this caller's.
+    if (entry && this.isDoomed(entry)) {
+      this.deleteKey(cacheKey)
+      entry = undefined
     }
-    entry ??= this.start(cacheKey, key, fill)
-    // Only a read still running has anything to cancel. Joining a settled one
-    // would add this caller to a set nothing will ever take it out of, since
-    // the entry drops its abort listeners when it settles.
-    if (!entry.settled) {
-      this.join(entry, signal)
+    if (entry) {
+      this.touch(cacheKey, entry)
+    } else {
+      entry = this.start(cacheKey, key, fill)
+    }
+    if (entry.pending) {
+      this.join(entry.pending, signal)
     }
 
     try {
-      const value = await this.settleFor(entry, signal)
-      // the read finished, but this caller gave up while waiting for it
+      return await this.settleFor(entry, signal)
+    } finally {
+      // This caller's own cancellation wins over whatever the shared read
+      // reported, a value included: it gave up while waiting.
       throwIfAborted(signal)
-      return value
-    } catch (e) {
-      // Prefer this caller's own cancellation to whatever the shared read
-      // reported. If we asked to stop, that is the answer we want — and when
-      // the read itself was cancelled it is because we, and everyone else,
-      // asked it to.
-      throwIfAborted(signal)
-      throw e
     }
   }
 
   /**
    * The shared read, but a caller that gives up while it is still running is
-   * released now rather than whenever that read lands.
+   * released now rather than whenever that read lands. The read is shared, so
+   * one caller aborting does not stop it, and awaiting `entry.promise` alone
+   * left that caller pending until every other waiter was done — or forever,
+   * against a fill that ignores its signal.
    *
-   * Awaiting `entry.promise` alone made abort() a request rather than an
-   * answer. The read is shared, so one caller aborting deliberately does not
-   * stop it — which left that caller pending until every *other* waiter was
-   * done: two callers on a 30s read, one aborts, and it waits the full 30s to
-   * be told about a cancellation it asked for itself. A fill that ignores the
-   * signal — a stalled fetch — never released it at all. Panning a genome
-   * browser is exactly this shape, since the abandoned blocks are the ones
-   * whose siblings are still wanted.
-   *
-   * Only for a read still in flight, and only for a signal that can be
-   * subscribed to. A settled entry has nothing left to wait for, and nothing
-   * here can learn when a duck-typed signal fires; both fall back to the
-   * post-await {@link throwIfAborted} in {@link get}, which is all either ever
-   * needed.
+   * Only for a read in flight and a signal that can be subscribed to. The rest
+   * fall back to the {@link throwIfAborted} in {@link get}.
    */
   private settleFor(entry: Entry<V>, signal?: AbortSignal) {
     if (
-      entry.settled ||
+      !entry.pending ||
       signal === undefined ||
       typeof signal.addEventListener !== 'function'
     ) {
       return entry.promise
     }
-    // Removed by reference rather than through a `{ signal }` option. Node holds
-    // that option's removal hook weakly, one per target, so a second listener
-    // registered that way on the same signal orphans the first after a GC — and
-    // an orphaned listener pins the entry and its value for the signal's life.
     let reject: (reason: unknown) => void
     const aborted = new Promise<never>((_resolve, rejectAborted) => {
       reject = rejectAborted
@@ -346,6 +306,10 @@ export class SharedReadCache<K, V> implements BudgetMember {
       // the caller's own reason, verbatim, as throwIfAborted would throw it
       reject(abortReason(signal))
     }
+    // Removed by reference rather than through a `{ signal }` option. Node holds
+    // that option's removal hook weakly, one per target, so a second listener
+    // registered that way on the same signal orphans the first after a GC — and
+    // an orphaned listener pins the entry and its value for the signal's life.
     signal.addEventListener('abort', onAbort, { once: true })
     // Losing this race leaves `entry.promise` unobserved here, which is safe
     // only because start() attaches its own handlers to it.
@@ -374,11 +338,6 @@ export class SharedReadCache<K, V> implements BudgetMember {
     if (!entry) {
       return undefined
     }
-    // A read every caller has abandoned is not a cached value, it is a
-    // rejection on its way to happening. Handing it back gives this caller
-    // someone else's cancellation, which it has no way to read as anything but
-    // a failed read — so answer as if the entry were not here, which is what
-    // get() effectively does by starting a fresh read in its place.
     if (this.isDoomed(entry)) {
       this.deleteKey(cacheKey)
       return undefined
@@ -387,13 +346,13 @@ export class SharedReadCache<K, V> implements BudgetMember {
     return entry.promise
   }
 
+  /**
+   * Whether {@link get} would be answered from the cache, by a settled value or
+   * a read in flight. False for a read every caller has abandoned, as it is for
+   * {@link get} and {@link getIfCached}. The one lookup that changes nothing.
+   */
   has(key: K) {
     const entry = this.entries.get(this.toCacheKey(key))
-    // A read every caller has abandoned is not a cached value, so `has` says so
-    // — {@link get} would start a fresh read for it and {@link getIfCached}
-    // would answer `undefined`, and three lookups disagreeing about one key is
-    // no use to anyone. Unlike those two this does not drop the entry, because
-    // this is the one lookup that leaves the cache alone.
     return entry !== undefined && !this.isDoomed(entry)
   }
 
@@ -403,7 +362,7 @@ export class SharedReadCache<K, V> implements BudgetMember {
 
   clear() {
     this.entries.clear()
-    this.charge(-this.total)
+    this.shared?.budget.charge(this.shared.membership, -this.total)
     this.total = 0
     this.settledCount = 0
     this.stopSweep()
@@ -412,37 +371,27 @@ export class SharedReadCache<K, V> implements BudgetMember {
   /**
    * Mark an entry most-recently-used, in both orders that word has here: its
    * position in {@link entries}, which {@link evict} and {@link lruSpare} walk,
-   * and its {@link Entry.seq}, which {@link SharedBudget} compares across
-   * caches.
+   * and its {@link Entry.seq}, which a budget compares across caches.
    *
-   * The two have to move together, and this is the only place either moves
-   * after {@link start} places a new entry at the front with a matching seq —
-   * which is the point of it being one function. {@link lruSpare} takes an
-   * entry from map order and reports *its* seq, so the budget's claim to evict
-   * the globally least-recently-used entry holds only while the two orders
-   * agree. They did not: settling stamped a fresh seq without moving the entry,
-   * so any read that settled out of the order it was started in left its cache
-   * offering the budget a seq belonging to some other entry.
+   * {@link lruSpare} takes an entry from map order and reports its seq, so the
+   * two orders have to move together. This and {@link start} are the only
+   * places either moves.
    */
   private touch(cacheKey: string, entry: Entry<V>) {
-    // re-insert so Map iteration order stays least-recently-used first
     this.entries.delete(cacheKey)
     this.entries.set(cacheKey, entry)
     entry.lastTouched = Date.now()
     entry.seq = this.stamp()
   }
 
-  /**
-   * This entry's place in the recency order {@link SharedBudget} evicts by.
-   * Only a budget compares these, so a cache without one has no order to keep.
-   */
+  /** Only a budget compares these, so a cache without one has no order to keep. */
   private stamp() {
-    return this.budget ? this.budget.nextSeq() : 0
+    return this.shared?.budget.nextSeq() ?? 0
   }
 
   /** In flight, but every caller waiting on it has already given up. */
   private isDoomed(entry: Entry<V>) {
-    return !entry.settled && entry.controller.signal.aborted
+    return entry.pending?.controller.signal.aborted === true
   }
 
   /**
@@ -458,28 +407,15 @@ export class SharedReadCache<K, V> implements BudgetMember {
       return
     }
     const cutoff = Date.now() - timeout
-    let sweepable = 0
     for (const [cacheKey, entry] of this.entries) {
-      // in-flight entries are skipped for the same reason evict() skips them:
-      // no weight to reclaim, and dropping one loses the de-duplication its
-      // waiters joined for
-      if (!entry.settled) {
-        continue
-      }
-      if (entry.lastTouched <= cutoff) {
+      if (!entry.pending && entry.lastTouched <= cutoff) {
         this.deleteKey(cacheKey)
-      } else {
-        sweepable++
       }
     }
-    // Stop when nothing SETTLED is left, rather than when the map is empty. A
-    // read that never settles — a stalled fetch on a dead connection, which is
-    // exactly when a consumer gives up and drops the cache — is never swept, so
-    // `entries.size` never reached zero and the timer ticked forever. Since the
-    // timer roots this cache, and this cache roots whatever its fill closes
-    // over, that one hung read pinned the whole graph indefinitely. Should it
-    // ever settle, settle() arms the timer again.
-    if (sweepable === 0) {
+    // Nothing settled left, rather than an empty map: a read that never settles
+    // is never swept, and must not keep the timer ticking. If it does settle,
+    // start() arms the timer again.
+    if (this.settledCount === 0) {
       this.stopSweep()
     }
   }
@@ -515,7 +451,10 @@ export class SharedReadCache<K, V> implements BudgetMember {
       }
     }, interval)
     this.sweepTimer = timer
-    unrefIfPossible(timer)
+    // Node holds the process open for a pending interval, and a library's
+    // housekeeping must never be why a script fails to exit. Browsers return a
+    // number, which has no unref.
+    ;(timer as { unref?: () => void }).unref?.()
   }
 
   private stopSweep() {
@@ -525,9 +464,9 @@ export class SharedReadCache<K, V> implements BudgetMember {
     }
   }
 
-  // The read runs under the entry's own controller rather than any one caller's
-  // signal, because the read is shared: it must survive until every caller
-  // waiting on it has given up. join() is what registers them.
+  // The read runs under its own controller rather than any one caller's signal,
+  // because it is shared: it must survive until every caller waiting on it has
+  // given up. join() is what registers them.
   private start(
     cacheKey: string,
     key: K,
@@ -539,77 +478,71 @@ export class SharedReadCache<K, V> implements BudgetMember {
         'SharedReadCache needs a fill, either on the cache or on the get() call',
       )
     }
-    const controller = new AbortController()
-    const entry: Entry<V> = {
-      promise: run(controller.signal),
+    const pending: PendingRead = {
       signals: new Map(),
       pinned: false,
-      controller,
-      settled: false,
+      controller: new AbortController(),
+    }
+    const entry: Entry<V> = {
+      // Promise.resolve hands a native promise back untouched, so getIfCached
+      // still returns the fill's own. What it adds is that an untyped fill
+      // returning a bare value is a read like any other, where calling `.then`
+      // on it threw after the entry was already in the map.
+      promise: Promise.resolve(run(pending.controller.signal)),
+      pending,
       size: 0,
       lastTouched: Date.now(),
       seq: this.stamp(),
     }
     this.entries.set(cacheKey, entry)
+    const isCurrent = () => this.entries.get(cacheKey) === entry
     const settle = () => {
-      entry.settled = true
-      // holding these would pin each caller's signal behind this entry, and the
-      // entry behind each signal
-      for (const [signal, onAbort] of entry.signals) {
+      for (const [signal, onAbort] of pending.signals) {
         signal.removeEventListener('abort', onAbort)
       }
-      entry.signals.clear()
+      entry.pending = undefined
     }
     // `.then(f, g)` rather than `.finally(f)` so the handler's own promise never
     // carries an unhandled rejection.
     void entry.promise.then(
       value => {
+        // Weighed while the entry still reads as in flight, because sizeOf is
+        // consumer code: if it deletes or clears from in here, the entry leaves
+        // as the uncounted read it still is.
+        const size = isCurrent() ? this.weigh(value) : undefined
+        // false too if a later read replaced this key while this one ran
+        const current = isCurrent()
         settle()
-        // a later read may have replaced this key while this one was in
-        // flight; charging its weight to that entry would double-count
-        if (this.entries.get(cacheKey) === entry) {
-          const size = this.weigh(value)
+        if (current) {
           if (size === undefined) {
-            // Not deleteKey: that credits back a settled entry, and this one
-            // was never counted as one. Dropped rather than kept at zero, so
-            // nothing the budget cannot see is retained.
+            // not deleteKey, which credits back a settled entry: this one was
+            // never counted as one
             this.entries.delete(cacheKey)
           } else {
-            // The idle clock starts when the value exists, not when the read
-            // for it began. Stamped only at start(), an entry lost its whole
-            // fill duration out of its idle budget — and one whose fill outran
-            // idleTimeoutMs arrived already expired, swept on the very next
-            // tick, so the query that paid for that read never got a single hit
-            // off it.
-            //
-            // Deliberately not a touch(). "How long since" and "which came
-            // first" are different questions, and only the first is about the
-            // value existing: a read's *latency* is a property of the
-            // transport, not of how the consumer is using the cache, so
-            // ordering evictions by it preferentially keeps whatever was
-            // slowest to arrive. In @gmod/tabix that is the largest chunk in
-            // the query, which is the last thing a budget should retain.
+            // The idle clock starts when the value exists, so a slow read
+            // still gets its whole timeout. Not a touch(): eviction order
+            // stays the order reads were asked for in, since ordering by when
+            // they landed keeps whatever was slowest to arrive.
             entry.lastTouched = Date.now()
-            this.settledCount++
             entry.size = size
+            this.settledCount++
             this.total += size
-            this.charge(size)
-            // the first thing the sweep could actually reclaim, so this is
-            // where the timer belongs — see startSweep
+            this.shared?.budget.charge(this.shared.membership, size)
             this.startSweep()
           }
         }
-        this.evictAfterSettle()
+        this.evict()
+        // after the local pass, so a cache that can get under its own ceiling
+        // does that first and only then competes for the shared one
+        this.shared?.budget.evict()
       },
       () => {
-        // a failed read caches nothing, so the next caller starts over rather
-        // than inheriting the failure. Dropped before settle() marks it, so it
-        // is never one of the settledCount entries deleteKey credits back.
-        if (this.entries.get(cacheKey) === entry) {
+        // A failed read caches nothing, so the next caller starts over. Dropped
+        // before settle(), so deleteKey sees the uncounted read it still is.
+        if (isCurrent()) {
           this.deleteKey(cacheKey)
         }
         settle()
-        this.evictAfterSettle()
       },
     )
     return entry
@@ -620,24 +553,14 @@ export class SharedReadCache<K, V> implements BudgetMember {
    * not answer with a weight, which drops the entry rather than keeping one the
    * budget cannot see.
    *
-   * It has to be checked because it is consumer code over consumer values.
-   * `v => v.byteLength` throws on a null value and returns `undefined` on a
-   * value without the field, and arithmetic turns the latter into `NaN` rather
-   * than an error. `NaN` in `total` is permanent: `total <= limit` is false
-   * forever after, so every settle evicts down to the last entry and the cache
-   * silently stops caching. Measured at five entries against a `maxSize` of 100
-   * collapsing to one.
+   * Checked because it is consumer code over consumer values: `v =>
+   * v.byteLength` returns `undefined` on a value without the field, arithmetic
+   * turns that into `NaN`, and `NaN` in `total` is permanent — `total <= limit`
+   * is false forever after, so every settle evicts down to the last entry.
    *
-   * Swallowed rather than rethrown, which is the part worth defending. Thrown
-   * from here it would reject a promise nothing holds — `unhandledRejection`,
-   * and so the end of the process. Carried into the entry's own promise it
-   * would fail the read for its callers, and that was tried: it made
-   * `getIfCached` hand back a chained promise rather than the one the fill
-   * returned, and pushed this bookkeeping a microtask later than the fill's own
-   * promise, so a consumer awaiting that and reading `totalSize` saw the last
-   * read missing. @gmod/cram caught both. Neither is a price worth paying to
-   * report a bug in a caller's `sizeOf`, when the read itself succeeded and the
-   * caller already has its value — so the value is served and simply not kept.
+   * Swallowed rather than rethrown. Thrown from here it would reject a promise
+   * nothing holds, and carried into the entry's own promise it would fail a
+   * read that succeeded and whose caller already has its value.
    */
   private weigh(value: V) {
     try {
@@ -650,49 +573,24 @@ export class SharedReadCache<K, V> implements BudgetMember {
 
   // Register a caller's interest, so the read survives until that caller has
   // given up too.
-  private join(entry: Entry<V>, signal?: AbortSignal) {
-    if (signal === undefined) {
-      entry.pinned = true
-    } else if (signal.aborted) {
-      // A caller that has already given up is not a waiter, and must not be
-      // counted as one: an `abort` listener never fires on a signal that
-      // aborted before it was added, so nothing would ever take this signal
-      // back out of the set. The count would never reach zero and the read
-      // would be uncancellable for everyone joined to it, silently.
-      //
-      // get() rejects such a caller before it reaches here, with no `await` in
-      // between, so this is unreachable today. It is here because this is the
-      // bug that shipped in @gmod/abortable-promise-cache, and an invariant
-      // that fails this quietly should not rest on a check twenty lines away.
-      if (!entry.pinned && entry.signals.size === 0) {
-        entry.controller.abort(signal.reason)
-      }
-    } else if (typeof signal.addEventListener !== 'function') {
-      // A duck-typed signal, not yet aborted. `{ aborted: false }` is what
-      // consumers hand-roll — @gmod/bam's test/csi.test.ts is one, and
-      // {@link throwIfAborted} exists because they are real — and subscribing
-      // to it was a TypeError rather than a read. It fired on the FIRST call
-      // that reached a cache with such a signal, so a consumer passing one got
-      // `signal.addEventListener is not a function` instead of its data.
-      //
-      // Pinned, for the same reason a signal-free caller is: nothing here can
-      // ever learn that this caller gave up, so the honest reading is that it
-      // cannot, and a read it is waiting on must not be cancelled out from
-      // under it. The caller is still told about its own cancellation — get()
-      // re-checks `aborted` after the read settles — so what it loses is only
-      // the ability to stop the read early, which is what an unsubscribable
-      // signal cannot ask for anyway.
-      entry.pinned = true
-    } else if (!entry.signals.has(signal)) {
-      // guarded so one signal joining the same key twice does not add two
-      // listeners
+  private join(pending: PendingRead, signal?: AbortSignal) {
+    if (signal === undefined || typeof signal.addEventListener !== 'function') {
+      // Nothing here can learn that this caller gave up — it has no signal, or
+      // a duck-typed `{ aborted }` that cannot be subscribed to — so the read
+      // must not be cancelled out from under it.
+      pending.pinned = true
+    } else if (!signal.aborted && !pending.signals.has(signal)) {
+      // `!signal.aborted` is unreachable through get(), which rejects such a
+      // caller first. It stays because an abort listener never fires on a
+      // signal that aborted before it was added: counted as a waiter, that
+      // caller would make the read uncancellable for everyone, silently.
       const onAbort = () => {
-        entry.signals.delete(signal)
-        if (!entry.pinned && entry.signals.size === 0) {
-          entry.controller.abort(signal.reason)
+        pending.signals.delete(signal)
+        if (!pending.pinned && pending.signals.size === 0) {
+          pending.controller.abort(signal.reason)
         }
       }
-      entry.signals.set(signal, onAbort)
+      pending.signals.set(signal, onAbort)
       signal.addEventListener('abort', onAbort, { once: true })
     }
   }
@@ -701,45 +599,33 @@ export class SharedReadCache<K, V> implements BudgetMember {
     const entry = this.entries.get(cacheKey)
     if (entry) {
       this.entries.delete(cacheKey)
-      if (entry.settled) {
+      if (!entry.pending) {
         this.settledCount--
       }
       this.total -= entry.size
-      this.charge(-entry.size)
-    }
-  }
-
-  private charge(delta: number) {
-    if (this.budget && this.membership) {
-      this.budget.charge(this.membership, delta)
+      this.shared?.budget.charge(this.shared.membership, -entry.size)
     }
   }
 
   /**
-   * @internal — {@link SharedBudget} asks; nothing else should.
+   * @internal — a budget asks; nothing else should.
    *
    * The least-recently-used settled entry, or `undefined` if this cache holds
-   * at most one. Iteration order is least-recently-used first, so this returns
-   * on the first settled entry it sees rather than walking the map.
+   * at most one.
    */
   lruSpare() {
-    // Before the scan: the budget asks every member on every eviction, and a
-    // member with nothing to spare would otherwise walk past all of its
-    // in-flight reads to discover that.
     if (this.settledCount <= 1) {
       return undefined
     }
     for (const [cacheKey, entry] of this.entries) {
-      // in flight: no weight to reclaim, and dropping one loses the
-      // de-duplication its waiters joined for
-      if (entry.settled) {
+      if (!entry.pending) {
         return { cacheKey, seq: entry.seq }
       }
     }
     return undefined
   }
 
-  /** @internal — {@link SharedBudget} evicting on this cache's behalf. */
+  /** @internal — a budget evicting on this cache's behalf. */
   release(cacheKey: string) {
     this.deleteKey(cacheKey)
   }
@@ -747,36 +633,25 @@ export class SharedReadCache<K, V> implements BudgetMember {
   /**
    * Evict from the least-recently-used end.
    *
-   * Reads still in flight are skipped: they are not results yet, they have no
-   * weight to reclaim, and dropping one would lose the de-duplication every
-   * caller joined to it is relying on.
+   * Reads still in flight are skipped: they have no weight to reclaim, and
+   * dropping one would lose the de-duplication every caller joined to it is
+   * relying on.
    *
    * The last settled entry is kept whatever the budget. A single value larger
    * than the whole budget is still worth holding — the caller needs it for the
    * request in flight, so dropping it only buys an immediate re-read.
    */
-  private evictAfterSettle() {
-    this.evict()
-    // after the local pass, so a cache that can get under its own ceiling
-    // does that first and only then competes for the shared one
-    this.budget?.evict()
-  }
-
   private evict() {
-    if (this.limit === Infinity) {
-      return
-    }
-    // Before the loop below, which a cache comfortably under its budget would
-    // otherwise enter and leave for nothing on every settle.
+    // also what keeps an unbounded cache, or one comfortably under its budget,
+    // from building an iterator on every settle
     if (this.total <= this.limit) {
       return
     }
-
     for (const [cacheKey, entry] of this.entries) {
       if (this.total <= this.limit || this.settledCount <= 1) {
         break
       }
-      if (entry.settled) {
+      if (!entry.pending) {
         this.deleteKey(cacheKey)
       }
     }

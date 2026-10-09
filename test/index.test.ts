@@ -2,7 +2,7 @@ import { getEventListeners } from 'node:events'
 
 import { expect, test, vi } from 'vitest'
 
-import { SharedReadCache, throwIfAborted } from '../src/index.ts'
+import { SharedBudget, SharedReadCache, throwIfAborted } from '../src/index.ts'
 
 // lets queued microtasks and timers run, so a joining caller reaches the
 // in-flight read before we abort the owner
@@ -1176,3 +1176,43 @@ test('the cached promise is the one the fill returned, and is weighed by then', 
   expect(cache.getIfCached('a')).toBe(read)
   expect(cache.totalSize).toBe(3)
 })
+
+// An untyped caller's fill can hand back a bare value. Calling `.then` on it
+// threw after the entry was already in the map, so the first caller got a
+// TypeError and every later one was handed the value by an entry that was
+// never settled, weighed, swept or evicted.
+test('a fill that returns a bare value is a read like any other', async () => {
+  const fill = (() => 'data') as unknown as () => Promise<string>
+  const cache = new SharedReadCache<string, string>({ fill, maxSize: 10 })
+
+  await expect(cache.get('k')).resolves.toBe('data')
+  await expect(cache.get('k')).resolves.toBe('data')
+  expect(cache.totalSize).toBe(1)
+})
+
+// sizeOf is consumer code, and it ran after the entry had been marked settled
+// but before it was counted as one. A delete() or clear() from inside it then
+// credited back an entry nothing had been charged for, leaving weight on the
+// books for a value the cache no longer held.
+test.each(['delete', 'clear'] as const)(
+  'a sizeOf that calls %s() on the cache leaves the accounting whole',
+  async method => {
+    const budget = new SharedBudget(100)
+    const cache = new SharedReadCache<string, string>({
+      budget,
+      fill: key => Promise.resolve(key),
+      sizeOf: value => {
+        cache[method](value)
+        return 10
+      },
+    })
+
+    await cache.get('k')
+    expect(cache.size).toBe(0)
+    expect(cache.totalSize).toBe(0)
+    expect(budget.total).toBe(0)
+
+    await cache.get('k')
+    expect(cache.totalSize).toBe(0)
+  },
+)

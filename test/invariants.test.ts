@@ -43,10 +43,11 @@ function world(seed: number) {
   /** reads that neither settle nor honour their signal, as a dead socket does */
   const stalled: AbortController[] = []
 
-  const build = (maxSize: number) =>
+  const build = (maxSize: number, idleTimeoutMs?: number) =>
     new SharedReadCache<string, string>({
       budget,
       maxSize,
+      idleTimeoutMs,
       sizeOf: value => value.length,
       fill: (key, signal) =>
         new Promise<string>((resolve, reject) => {
@@ -59,7 +60,8 @@ function world(seed: number) {
         }),
     })
 
-  const caches = [build(6), build(8)]
+  // one with an idle timeout short enough that the sweepIdle step reclaims
+  const caches = [build(6), build(8, 1)]
 
   const check = () => {
     for (const cache of caches) {
