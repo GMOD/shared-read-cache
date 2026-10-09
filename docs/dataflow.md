@@ -37,10 +37,12 @@ the read itself was cancelled, that is because every joined caller asked for it.
 `join` is where a caller's interest is registered, and it has four cases:
 
 - **a real, unaborted signal** — added to the entry's waiter set with an `abort`
-  listener. The listener is registered with
-  `{ once: true, signal: entry.dispose.signal }`, so it comes off whether the
-  abort fires or the entry settles. Without that second half, a long-lived
-  signal accumulates one listener per key it ever touches.
+  listener. `{ once: true }` takes the listener off when the abort fires, and
+  the entry removes it by reference when the read settles. Without that second
+  half, a long-lived signal accumulates one listener per key it ever touches,
+  each pinning its entry's value. The removal is `removeEventListener` rather
+  than the `{ signal }` option, because Node holds that option's removal hook
+  weakly and loses it across a GC when one target carries two of them.
 - **no signal** — the entry is _pinned_. A caller with no signal can never
   abort, so aborting every other caller still doesn't stop the read it joined.
   One signal-free consumer therefore makes that read uncancellable for everyone

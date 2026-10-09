@@ -77,10 +77,10 @@ export interface SharedReadCacheOptions<K, V> {
    * This is the parameter the whole package exists for. Every hand-rolled copy
    * of this cache across the gmod repos was identical except here: @gmod/bam
    * and @gmod/tabix weigh decompressed bytes, @gmod/bbi weighs entries, and
-   * @gmod/cram weighs decoded records. An entry cannot be weighed until its
-   * read settles, so a cache that does this has to own its entries — which is
-   * exactly why those four could not share a plain-LRU-backed package and each
-   * wrote their own.
+   * @gmod/cram weighed decoded records before it moved to bytes. An entry
+   * cannot be weighed until its read settles, so a cache that does this has to
+   * own its entries — which is exactly why those four could not share a
+   * plain-LRU-backed package and each wrote their own.
    */
   sizeOf?: (value: V) => number
 

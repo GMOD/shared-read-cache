@@ -20,9 +20,6 @@
     "email": "colin.diesh@gmail.com",
     "url": "https://github.com/cmdcolin"
   },
-  "directories": {
-    "lib": "dist"
-  },
   "files": [
     "dist",
     "esm",

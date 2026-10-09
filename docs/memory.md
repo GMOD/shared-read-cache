@@ -11,20 +11,21 @@ reclamation that runs between calls. A `SharedBudget` bounds several caches in
 aggregate, which no per-cache ceiling can do. And `delete()`/`clear()` are the
 consumer saying so directly.
 
-Two entries are never dropped by any of the automatic three: a read still in
-flight, which has no weight to reclaim and whose de-duplication its waiters rely
-on, and the last settled entry, which the caller needs for the request in
-flight. So the worst any budget can cost is a re-read: the cache never refuses a
-value for being too large.
+None of the automatic three drops a read still in flight, which has no weight to
+reclaim and whose de-duplication its waiters rely on. `maxSize` and a
+`SharedBudget` also keep a cache's last settled entry, which the caller needs
+for the request in flight; the idle sweep does not, since reclaiming everything
+from a cache nobody is reading is its whole job. So the worst any budget can
+cost is a re-read: the cache never refuses a value for being too large.
 
 ## Why `sizeOf`
 
 The package exists because four gmod packages each hand-rolled this cache,
 identical except for how they weighed an entry: `@gmod/bam` and `@gmod/tabix`
-weigh decompressed bytes, `@gmod/bbi` weighs entries, `@gmod/cram` weighs
-decoded records — a decoded record has no cheap size. The cache cannot call
-`sizeOf` until a read settles, so a cache that budgets this way has to own its
-entries, which is why a plain-LRU-backed package could not serve them.
+weigh decompressed bytes, `@gmod/bbi` weighs entries, and `@gmod/cram` weighed
+decoded records before it measured a decoded slice in bytes. The cache cannot
+call `sizeOf` until a read settles, so a cache that budgets this way has to own
+its entries, which is why a plain-LRU-backed package could not serve them.
 
 Omit `sizeOf` and the budget counts entries.
 
@@ -62,20 +63,26 @@ expires. A slow read still gets its full timeout to be reused in rather than
 spending it on its own download. The sweep skips reads in flight.
 
 The interval is a quarter of the timeout, bounding the lag between an entry
-going idle and being reclaimed at about 1.25x rather than 2x. `sweepIdle()`
-reclaims on demand — on a tab going hidden, say — instead of waiting for it.
-`@gmod/bam` measured a pan that held 331 MB going to 0 MB once idle
-([ADR 0015](https://github.com/GMOD/bam-js/blob/main/agent-docs/adr/0015-reclaim-the-chunk-cache-when-nothing-is-using-it.md)).
+going idle and being reclaimed at about 1.25x rather than 2x. It is never
+shorter than a second, so a timeout under four seconds lags by up to that second
+instead. `sweepIdle()` reclaims on demand — on a tab going hidden, say — instead
+of waiting for it. `@gmod/bam` measured a pan that held 331 MB going to 0 MB
+once idle
+([ADR 0015](https://github.com/GMOD/bam-js/blob/main/agent-docs/architecture-decision-records/0015-reclaim-the-chunk-cache-when-nothing-is-using-it.md)).
 
 The timer needs no `dispose()` call. It is armed by the first read to _settle_
 and stopped by the first sweep that finds no settled entry left, so it runs only
-while it has something to reclaim, and it `unref`s itself where that exists. A
-consumer that drops the cache without clearing it leaves one timer alive for at
-most a timeout plus an interval. Note the stop condition is "nothing settled
-left", not "the map is empty": a read that never settles — a stalled fetch on a
-dead connection, which is exactly when a consumer gives up — is never swept, and
-against an empty-map condition that one hung read pinned the timer, the cache,
-and everything its fill closed over, forever.
+while it has something to reclaim, and it `unref`s itself where that exists. It
+holds the cache through a `WeakRef`, so a consumer that drops the cache without
+clearing it has dropped it: the cache is collected like anything else, and the
+timer clears itself on its next tick. Held strongly, the timer kept a dropped
+cache alive, and charged to its `SharedBudget`, for a whole idle timeout;
+jbrowse measured a closed alignments track holding 296 MB for four minutes that
+way. Note the stop condition is "nothing settled left", not "the map is empty":
+a read that never settles — a stalled fetch on a dead connection, which is
+exactly when a consumer gives up — is never swept, and against an empty-map
+condition that one hung read pinned the timer, the cache, and everything its
+fill closed over, forever.
 
 ## There is one eviction policy
 
@@ -107,15 +114,15 @@ a member yields only what is _globally_ least-recently-used: tracks the reader
 is not looking at age out and hand their space to the one being panned, so the
 active track keeps a working set whatever the track count. The workload, the
 split, and the refill counts are
-[bam-js ADR 0018](https://github.com/GMOD/bam-js/blob/main/agent-docs/adr/0018-a-per-file-ceiling-is-not-a-bound-on-a-consumer-with-many-files.md),
+[bam-js ADR 0018](https://github.com/GMOD/bam-js/blob/main/agent-docs/architecture-decision-records/0018-a-per-file-ceiling-is-not-a-bound-on-a-consumer-with-many-files.md),
 which is why this class exists.
 
 Two things to know before reaching for one:
 
 - Every member must weigh in the same unit. `total` is a sum over members, so it
   means nothing unless their `sizeOf` agree — and across these packages they do
-  not. A budget holding a bam cache (bytes) and a cram cache (records) would be
-  adding bytes to records and bounding neither. `sizeOf` is opaque by design, so
+  not. A budget holding a bam cache (bytes) and a bbi cache (entries) would be
+  adding bytes to entries and bounding neither. `sizeOf` is opaque by design, so
   no runtime check catches a mismatch: group members by unit, one budget per
   group.
 - A budget composes with `maxSize` rather than replacing it. A cache that passes

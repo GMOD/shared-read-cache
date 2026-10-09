@@ -22,7 +22,7 @@ common: a memo whose fill is a closure passed per `get()` call.
 | `cacheKey(key)`     | `String(key)` | Maps a key to its cache key.                                                                                                                                                                                                                                                                                                                      |
 | `sizeOf(value)`     | `() => 1`     | Weighs a settled value against the budget. The default makes the budget an entry count. A value it cannot weigh — a throw, `NaN`, a negative — is served to the caller as normal but not cached, since the budget could not account for it. See [memory.md](memory.md#why-sizeof), and [consumers.md](consumers.md) for what each package weighs. |
 | `maxSize`           | `Infinity`    | Budget, in whatever unit `sizeOf` returns.                                                                                                                                                                                                                                                                                                        |
-| `idleTimeoutMs`     | none          | Drop an entry once nothing has asked for it for this long.                                                                                                                                                                                                                                                                                        |
+| `idleTimeoutMs`     | none          | Drop an entry once nothing has asked for it for this long. `0`, a negative and `Infinity` all mean never.                                                                                                                                                                                                                                         |
 | `budget`            | none          | A [`SharedBudget`](#new-sharedbudgetlimit) this cache joins. Composes with `maxSize` rather than replacing it.                                                                                                                                                                                                                                    |
 
 ### `get(key, signal?, fill?)`
@@ -34,8 +34,11 @@ and as soon as it aborts while the read is in flight — the read itself runs on
 for whoever still wants it. See [dataflow.md](dataflow.md).
 
 `fill` overrides the constructor's for this call, for a read that is a closure
-over the thing being read rather than a function of the key. The cache drops a
-rejection rather than caching it, so the next caller starts over.
+over the thing being read rather than a function of the key. The cache runs it
+only on a miss: a call that hits a cached value or joins a read in flight gets
+that read's result and its own `fill` is ignored, so everything a fill depends
+on has to be in the key. The cache drops a rejection rather than caching it, so
+the next caller starts over.
 
 ### `getIfCached(key)`
 
@@ -50,8 +53,9 @@ has not landed yet.
 
 ### `has(key)`
 
-Whether an entry exists, including a read still in flight. The only lookup that
-does not touch LRU order.
+Whether `get()` would be answered from the cache, by a settled value or a read
+still in flight. False for a read every caller has abandoned, which `get()`
+would replace. The only lookup that does not touch LRU order.
 
 ### `delete(key)` / `clear()`
 
@@ -115,3 +119,12 @@ they touch only `.aborted`.
 What a `SharedBudget` needs from a cache: `lruSpare()` and `release(cacheKey)`.
 `SharedReadCache` implements it. Exported as a type for anyone reading the
 budget's signature, not as an extension point.
+
+## `Budget` / `BudgetMembership`
+
+The type of the `budget` option: `register`, `charge`, `nextSeq` and `evict`,
+which `SharedBudget` implements. The option takes the interface rather than the
+class so that the budget and the cache can come from two installs of this
+package — an application creating the budget and `@gmod/bam` constructing the
+cache, say — where a class with private fields would not typecheck against its
+own copy. `BudgetMembership` is the handle `register` returns.

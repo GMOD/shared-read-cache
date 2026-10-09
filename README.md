@@ -33,8 +33,7 @@ underneath a filehandle.
   where a caller's signal is checked, what `join` does with it, and what
   settling an entry costs
 - [docs/memory.md](docs/memory.md) — the four ways an entry leaves the cache,
-  and what each of `maxSize`, `idleTimeoutMs`, `evictionPolicy` and
-  `SharedBudget` measured
+  and what each of `maxSize`, `idleTimeoutMs` and `SharedBudget` measured
 - [docs/api.md](docs/api.md) — every option and method
 - [docs/consumers.md](docs/consumers.md) — which gmod package uses this for
   what, which of them can share a budget, and where each measurement above was
@@ -95,9 +94,10 @@ than spending it on its own download. The sweep skips reads in flight.
 than waiting for the interval.
 
 The sweep runs only while it has something to reclaim: the first read to settle
-arms it, and the first sweep that finds no settled entry stops it, which is why
-there is no `dispose()` to forget to call. It `unref`s itself where that exists,
-so it will never hold a Node process open.
+arms it, and the first sweep that finds no settled entry stops it. The timer
+holds its cache weakly, so a cache you drop is collected without a `dispose()`
+call, and it `unref`s itself where that exists, so it never holds a Node process
+open.
 
 ## One budget across several caches
 
@@ -113,7 +113,7 @@ const cache = new SharedReadCache({ budget, sizeOf, fill })
 
 It composes with `maxSize` rather than replacing it, it holds its members weakly
 so there is no `unregister` to forget, and every member must weigh in the same
-unit — a budget adding one cache's bytes to another's record counts bounds
+unit — a budget adding one cache's bytes to another's entry counts bounds
 neither. [docs/memory.md](docs/memory.md) has what dividing a ceiling by the
 file count measured instead.
 
@@ -121,10 +121,11 @@ file count measured instead.
 
 This package exists because four gmod packages each hand-rolled the same cache,
 identical except for how they weighed an entry: `@gmod/bam` and `@gmod/tabix`
-weigh decompressed bytes, `@gmod/bbi` weighs entries, `@gmod/cram` weighs
-decoded records. The cache cannot call `sizeOf` until a read settles, so a cache
-that budgets this way has to own its entries — which is why a plain-LRU-backed
-package could not serve them and each wrote its own.
+weigh decompressed bytes, `@gmod/bbi` weighs entries, and `@gmod/cram` first
+weighed decoded records and now weighs bytes. The cache cannot call `sizeOf`
+until a read settles, so a cache that budgets this way has to own its entries —
+which is why a plain-LRU-backed package could not serve them and each wrote its
+own.
 
 Omit `sizeOf` and the budget counts entries.
 
