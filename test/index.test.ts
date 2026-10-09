@@ -1,3 +1,5 @@
+import { getEventListeners } from 'node:events'
+
 import { expect, test, vi } from 'vitest'
 
 import { SharedReadCache, throwIfAborted } from '../src/index.ts'
@@ -441,48 +443,28 @@ test('throwIfAborted passes a live or absent signal', () => {
 // -- for as long as that signal lives. @gmod/abortable-promise-cache leaked one
 // per key a signal ever touched and nothing noticed.
 //
-// So this checks the mechanism rather than an effect: the listener must be
-// registered with a teardown signal, and that teardown must fire when the entry
-// settles. Without it, `waiterCount` still reads 0 (the Set is cleared either
-// way) and every other test here passes.
+// So this asks the signal itself what it is still holding. A GC runs while the
+// read is in flight because that is what the leak needed: Node keeps the removal
+// hook of an `addEventListener(..., { signal })` weakly, one per target, so the
+// second listener registered that way orphaned the first, and after a
+// collection nothing could take it back off. Listeners are removed by
+// reference now, which no collection can undo.
 test('the abort listener is torn down when the entry settles', async () => {
   const { fill, firstStarted, release } = parkedFill('data')
   const cache = new SharedReadCache<string, string>({ fill, maxSize: 10 })
 
-  const controller = new AbortController()
-  const captured: (AddEventListenerOptions | undefined)[] = []
-  const signal = new Proxy(controller.signal, {
-    get(target, prop) {
-      if (prop === 'addEventListener') {
-        return (
-          type: string,
-          listener: EventListener,
-          options?: AddEventListenerOptions,
-        ) => {
-          captured.push(options)
-          target.addEventListener(type, listener, options)
-        }
-      }
-      const value: unknown = Reflect.get(target, prop, target)
-      return typeof value === 'function' ? value.bind(target) : value
-    },
-  })
-
+  const { signal } = new AbortController()
   const p = cache.get('k', signal)
   await firstStarted
-  // Every listener a read puts on a caller's signal, not a count of them: get()
-  // registers one to track the waiter and one to release this caller early if
-  // it aborts, and the invariant is about each of them carrying a teardown --
-  // pinning the count here just breaks the next time a second one is needed.
-  expect(captured.length).toBeGreaterThan(0)
+  expect(getEventListeners(signal, 'abort').length).toBeGreaterThan(0)
 
-  const teardowns = captured.map(options => options?.signal)
-  expect(teardowns.every(signal => signal !== undefined)).toBe(true)
-  expect(teardowns.some(signal => signal?.aborted)).toBe(false)
+  await tick()
+  globalThis.gc?.()
+  await tick()
 
   release()
   await p
-  expect(teardowns.every(signal => signal?.aborted)).toBe(true)
+  expect(getEventListeners(signal, 'abort')).toHaveLength(0)
 })
 
 test('the budget is a hard ceiling', async () => {
@@ -1059,33 +1041,12 @@ test('a completed read leaves no listener on the caller signal', async () => {
     fill: key => Promise.resolve(key),
   })
 
-  const controller = new AbortController()
-  let live = 0
-  const signal = new Proxy(controller.signal, {
-    get(target, prop) {
-      if (prop === 'addEventListener') {
-        return (
-          type: string,
-          listener: EventListener,
-          options?: AddEventListenerOptions,
-        ) => {
-          live++
-          options?.signal?.addEventListener('abort', () => {
-            live--
-          })
-          target.addEventListener(type, listener, options)
-        }
-      }
-      const value: unknown = Reflect.get(target, prop, target)
-      return typeof value === 'function' ? value.bind(target) : value
-    },
-  })
-
+  const { signal } = new AbortController()
   for (let i = 0; i < 20; i++) {
     await cache.get(`k${i}`, signal)
   }
   await tick()
-  expect(live).toBe(0)
+  expect(getEventListeners(signal, 'abort')).toHaveLength(0)
 })
 
 // A duck-typed signal cannot be subscribed to, so there is nothing to race the

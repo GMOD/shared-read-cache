@@ -8,5 +8,8 @@ export default defineConfig({
     // against a tree you are not looking at. Spread the defaults rather than
     // replacing them, or node_modules gets collected.
     exclude: [...configDefaults.exclude, '**/.claude/**'],
+    // for the tests that need a collection to happen: a WeakRef clearing, a
+    // listener whose removal hook is held weakly
+    execArgv: ['--expose-gc'],
   },
 })

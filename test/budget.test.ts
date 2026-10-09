@@ -333,17 +333,10 @@ test('a cache with no budget has no cross-cache order to keep', async () => {
  */
 async function collect() {
   for (let attempt = 0; attempt < 20; attempt++) {
-    globalThis.gc?.()
+    globalThis.gc!()
     await new Promise(resolve => setTimeout(resolve, 1))
   }
 }
-
-/**
- * Only where a collection can actually be asked for. CI runs the suite with
- * `--expose-gc` so these always run there; a plain `pnpm test` skips them, and
- * `NODE_OPTIONS=--expose-gc pnpm test` opts in locally.
- */
-const testWithGc = test.skipIf(globalThis.gc === undefined)
 
 // Members are held weakly so that a long-lived budget never keeps a cache
 // reachable -- closing a track in jbrowse reclaims by dropping the last
@@ -351,45 +344,39 @@ const testWithGc = test.skipIf(globalThis.gc === undefined)
 // turn that into the exact leak it exists to prevent. What the weak ref costs
 // is that a member can vanish still owing weight, so the budget keeps its last
 // known contribution beside it and credits that back once the ref is empty.
-testWithGc(
-  'a collected member is pruned, and stops being counted',
-  async () => {
-    // room to spare, so nothing is evicted and the whole 200 is still owed
-    const budget = new SharedBudget(1000)
+test('a collected member is pruned, and stops being counted', async () => {
+  // room to spare, so nothing is evicted and the whole 200 is still owed
+  const budget = new SharedBudget(1000)
 
-    // scoped, so nothing here holds the cache once it returns
-    await (async () => {
-      const cache = weighed(budget, 100)
-      await cache.get('a')
-      await cache.get('b')
-    })()
+  // scoped, so nothing here holds the cache once it returns
+  await (async () => {
+    const cache = weighed(budget, 100)
+    await cache.get('a')
+    await cache.get('b')
+  })()
 
-    expect(budget.total).toBe(200)
-    expect(budget.size).toBe(1)
+  expect(budget.total).toBe(200)
+  expect(budget.size).toBe(1)
 
-    await collect()
+  await collect()
 
-    // read before size(), which would prune first and hide a stale total
-    expect(budget.total).toBe(0)
-    expect(budget.size).toBe(0)
-  },
-)
+  // read before size(), which would prune first and hide a stale total
+  expect(budget.total).toBe(0)
+  expect(budget.size).toBe(0)
+})
 
 // A budget under its limit has no reason to evict, and evicting was what used
 // to prune. So the one case where a stale total could sit forever is exactly
 // the quiet one a consumer would poll to report memory.
-testWithGc(
-  'an idle budget does not go on counting a cache that is gone',
-  async () => {
-    const budget = new SharedBudget(Infinity)
+test('an idle budget does not go on counting a cache that is gone', async () => {
+  const budget = new SharedBudget(Infinity)
 
-    await (async () => {
-      const cache = weighed(budget, 5)
-      await cache.get('a')
-    })()
+  await (async () => {
+    const cache = weighed(budget, 5)
+    await cache.get('a')
+  })()
 
-    await collect()
+  await collect()
 
-    expect(budget.total).toBe(0)
-  },
-)
+  expect(budget.total).toBe(0)
+})

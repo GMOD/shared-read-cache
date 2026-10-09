@@ -24,16 +24,15 @@ function unrefIfPossible(timer: unknown) {
 interface Entry<V> {
   promise: Promise<V>
   /**
-   * Signals of the callers still waiting on this read. The read is cancelled
-   * only once every one of them has given up — see {@link SharedReadCache.join}.
+   * The callers still waiting on this read, each with the listener the read put
+   * on its signal. The read is cancelled only once every one of them has given
+   * up — see {@link SharedReadCache.join}.
    */
-  signals: Set<AbortSignal>
+  signals: Map<AbortSignal, () => void>
   /** true once a caller joins without a signal, which pins the read */
   pinned: boolean
   /** aborts when every caller has given up; what the read actually runs under */
   controller: AbortController
-  /** aborted to take this read's listeners back off its callers' signals */
-  dispose: AbortController
   settled: boolean
   /** 0 until the read settles and the value can be weighed */
   size: number
@@ -332,31 +331,23 @@ export class SharedReadCache<K, V> implements BudgetMember {
     ) {
       return entry.promise
     }
-    // Aborted once the race is decided, to take this listener back off the
-    // caller's signal. Without it a long-lived signal collects one listener per
-    // get() it ever made, which is the leak {@link Entry.dispose} exists to
-    // avoid on the other listener.
-    const unsubscribe = new AbortController()
-    return Promise.race([
-      // Losing this race leaves `entry.promise` unobserved here, which is safe
-      // only because start() attaches its own handlers to it — otherwise a read
-      // that failed after its last caller walked away would surface as an
-      // unhandled rejection.
-      entry.promise,
-      new Promise<never>((_resolve, reject) => {
-        signal.addEventListener(
-          'abort',
-          () => {
-            // the caller's own reason, verbatim, exactly as throwIfAborted
-            // would have thrown it -- see abortReason
-            // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
-            reject(abortReason(signal))
-          },
-          { once: true, signal: unsubscribe.signal },
-        )
-      }),
-    ]).finally(() => {
-      unsubscribe.abort()
+    // Removed by reference rather than through a `{ signal }` option. Node holds
+    // that option's removal hook weakly, one per target, so a second listener
+    // registered that way on the same signal orphans the first after a GC — and
+    // an orphaned listener pins the entry and its value for the signal's life.
+    let reject: (reason: unknown) => void
+    const aborted = new Promise<never>((_resolve, rejectAborted) => {
+      reject = rejectAborted
+    })
+    const onAbort = () => {
+      // the caller's own reason, verbatim, as throwIfAborted would throw it
+      reject(abortReason(signal))
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    // Losing this race leaves `entry.promise` unobserved here, which is safe
+    // only because start() attaches its own handlers to it.
+    return Promise.race([entry.promise, aborted]).finally(() => {
+      signal.removeEventListener('abort', onAbort)
     })
   }
 
@@ -539,10 +530,9 @@ export class SharedReadCache<K, V> implements BudgetMember {
     const controller = new AbortController()
     const entry: Entry<V> = {
       promise: run(controller.signal),
-      signals: new Set(),
+      signals: new Map(),
       pinned: false,
       controller,
-      dispose: new AbortController(),
       settled: false,
       size: 0,
       lastTouched: Date.now(),
@@ -551,9 +541,11 @@ export class SharedReadCache<K, V> implements BudgetMember {
     this.entries.set(cacheKey, entry)
     const settle = () => {
       entry.settled = true
-      // nothing reads these once the read has settled, and holding them would
-      // pin each caller's AbortController behind this entry
-      entry.dispose.abort()
+      // holding these would pin each caller's signal behind this entry, and the
+      // entry behind each signal
+      for (const [signal, onAbort] of entry.signals) {
+        signal.removeEventListener('abort', onAbort)
+      }
       entry.signals.clear()
     }
     // `.then(f, g)` rather than `.finally(f)` so the handler's own promise never
@@ -682,20 +674,14 @@ export class SharedReadCache<K, V> implements BudgetMember {
     } else if (!entry.signals.has(signal)) {
       // guarded so one signal joining the same key twice does not add two
       // listeners
-      entry.signals.add(signal)
-      signal.addEventListener(
-        'abort',
-        () => {
-          entry.signals.delete(signal)
-          if (!entry.pinned && entry.signals.size === 0) {
-            entry.controller.abort(signal.reason)
-          }
-        },
-        // `once` covers the abort firing; `dispose` covers it never firing.
-        // Without this a long-lived signal accumulates one listener per key it
-        // ever touches, which is what @gmod/abortable-promise-cache did.
-        { once: true, signal: entry.dispose.signal },
-      )
+      const onAbort = () => {
+        entry.signals.delete(signal)
+        if (!entry.pinned && entry.signals.size === 0) {
+          entry.controller.abort(signal.reason)
+        }
+      }
+      entry.signals.set(signal, onAbort)
+      signal.addEventListener('abort', onAbort, { once: true })
     }
   }
 
