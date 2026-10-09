@@ -43,11 +43,10 @@ function world(seed: number) {
   /** reads that neither settle nor honour their signal, as a dead socket does */
   const stalled: AbortController[] = []
 
-  const build = (maxSize: number, evictionPolicy: 'lru' | 'batch') =>
+  const build = (maxSize: number) =>
     new SharedReadCache<string, string>({
       budget,
       maxSize,
-      evictionPolicy,
       sizeOf: value => value.length,
       fill: (key, signal) =>
         new Promise<string>((resolve, reject) => {
@@ -60,9 +59,7 @@ function world(seed: number) {
         }),
     })
 
-  const lru = build(6, 'lru')
-  const batch = build(8, 'batch')
-  const caches = [lru, batch]
+  const caches = [build(6), build(8)]
 
   const check = () => {
     for (const cache of caches) {
@@ -130,8 +127,6 @@ function world(seed: number) {
   return {
     budget,
     caches,
-    lru,
-    batch,
     parked,
     outstanding,
     stalled,
@@ -144,18 +139,8 @@ function world(seed: number) {
 test.each([1, 2, 3, 12345, 987654])(
   'the accounting holds across a random sequence (seed %i)',
   async seed => {
-    const {
-      budget,
-      caches,
-      lru,
-      batch,
-      parked,
-      outstanding,
-      stalled,
-      steps,
-      check,
-      pick,
-    } = world(seed)
+    const { budget, caches, parked, outstanding, stalled, steps, check, pick } =
+      world(seed)
 
     for (let step = 0; step < 250; step++) {
       pick(steps)()
@@ -181,21 +166,10 @@ test.each([1, 2, 3, 12345, 987654])(
 
     // a hard ceiling, except that the last settled entry is kept whatever the
     // budget, so one entry left is the floor rather than a violation
-    if (lru.size > 1) {
-      expect(lru.totalSize).toBeLessThanOrEqual(lru.maxSize)
-    }
-
-    // Not a hard ceiling: a batch touching more than the whole budget stays over
-    // it until the next batch lands. So land two -- one to end the batch still
-    // marked current, one to evict it -- and it comes back under. That it always
-    // can is the property worth pinning, since an abandoned read used to leave
-    // the pending count nonzero forever and then no next batch could land.
-    for (const key of ['y', 'z']) {
-      await batch.get(key, undefined, () => Promise.resolve(key))
-    }
-    await tick()
-    if (batch.size > 1) {
-      expect(batch.totalSize).toBeLessThanOrEqual(batch.maxSize)
+    for (const cache of caches) {
+      if (cache.size > 1) {
+        expect(cache.totalSize).toBeLessThanOrEqual(cache.maxSize)
+      }
     }
 
     if (caches.every(cache => cache.size > 1)) {

@@ -77,46 +77,19 @@ dead connection, which is exactly when a consumer gives up — is never swept, a
 against an empty-map condition that one hung read pinned the timer, the cache,
 and everything its fill closed over, forever.
 
-## `evictionPolicy: 'batch'` — try a bigger `maxSize` first
+## There is one eviction policy
 
-`'batch'` waits until no reads are in flight and then spares everything that
-batch touched, because one request starts many reads and holds all their values
-until it returns: evicting one mid-request frees nothing and only guarantees the
-next identical request re-reads it.
-
-`@gmod/cram` adopted it on a 117ms-against-12ms measurement and then dropped it
-again. That measurement was taken with a budget 2.75x _below_ the request's
-working set; raising the budget above the working set made the two policies
-measurably identical — same re-read counts, times inside noise — because a
-request that fits has nothing to evict mid-flight under either. `@gmod/bam`
-measured it from the other side: on a pan workload over an undersized budget,
-`'batch'` did not rescue it at all, matching `'lru'` re-read for re-read while
-retaining 1.7x the memory.
-
-`'batch'` changes behavior only once a batch exceeds the budget, and when it
-does, memory exceeds the budget too — cram measured it holding 420,000 records
-against a stated limit of 20,000. That is the mechanism, not a side effect: a
-consumer lowering the budget to constrain memory will not get what it asked for.
-Reach for it when a too-small budget is genuinely forced on you and the workload
-is repeated identical requests. No consumer currently does: both sides are
-written up where they were measured, in
+Versions before 2.0 offered `evictionPolicy: 'batch'`, which deferred eviction
+until no read was in flight and then spared everything that batch had touched.
+`@gmod/cram` adopted it on a 117ms-against-12ms measurement taken with a budget
+2.75x below the request's working set, and dropped it once raising the budget
+above the working set made the two policies measurably identical. `@gmod/bam`
+measured that it did not rescue an undersized budget either, while retaining
+1.7x the memory. No consumer set it after that, so 2.0 removed it: size the
+budget above one request instead. Both measurements are written up in
 [cram-js ADR 0005](https://github.com/GMOD/cram-js/blob/main/docs/adr/0005-drop-the-batch-eviction-policy.md)
 and
-[bam-js ADR 0013](https://github.com/GMOD/bam-js/blob/main/agent-docs/adr/0013-the-batch-eviction-policy-does-not-transfer.md).
-
-Ending a batch bumps a counter that the survivors' marks are compared against,
-which ages all of them out at once; clearing a mark per entry would be
-O(entries) on every batch, including the batches under budget that reach there
-only to do that. A batch ends when its last read _settles_, which is not the
-same as any eviction pass running — lowering `maxSize` runs one, and ending the
-batch in flight there would age out the very entries the policy exists to spare.
-
-What counts as in flight is a read someone is still waiting on. A read every
-caller has abandoned, or one the cache has dropped, stops deferring the batch
-immediately: nothing holds its value, so it is not what the deferral is for —
-and a read cancelled against a transport that ignores its signal never settles
-to say so. Counting one of those meant a single stalled fetch deferred eviction
-for the life of the cache, however far past `maxSize` it climbed.
+[bam-js ADR 0013](https://github.com/GMOD/bam-js/blob/main/agent-docs/architecture-decision-records/0013-the-batch-eviction-policy-does-not-transfer.md).
 
 ## `SharedBudget` — when the cache count is a property of the workload
 

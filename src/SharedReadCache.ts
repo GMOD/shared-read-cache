@@ -35,22 +35,8 @@ interface Entry<V> {
   /** aborted to take this read's listeners back off its callers' signals */
   dispose: AbortController
   settled: boolean
-  /**
-   * true while this read is counted in {@link SharedReadCache.pending}, which
-   * is what the batch policy waits on. Cleared when the read settles, and
-   * early if the cache drops it or every caller gives up — see
-   * {@link SharedReadCache.detach}.
-   */
-  counted: boolean
   /** 0 until the read settles and the value can be weighed */
   size: number
-  /**
-   * The batch this entry was last touched by; only meaningful under the batch
-   * policy, which spares everything carrying the batch in flight's number.
-   * Compared against a counter rather than cleared entry by entry, so ending a
-   * batch is O(1) instead of O(entries).
-   */
-  batch: number
   /**
    * `Date.now()` at the last {@link SharedReadCache.get} or
    * {@link SharedReadCache.getIfCached} that resolved to this entry.
@@ -114,41 +100,6 @@ export interface SharedReadCacheOptions<K, V> {
   /** Maps a key to its cache key. Defaults to `String(key)`. */
   cacheKey?: (key: K) => string
 
-  /**
-   * When to evict. Defaults to `'lru'`.
-   *
-   * `'lru'` evicts as each read settles, so the budget is a hard ceiling.
-   *
-   * `'batch'` waits until no reads are in flight and then spares everything
-   * that batch touched. The case for it: a single request that starts many
-   * reads at once and holds all of their values until it returns: evicting one
-   * mid-request frees nothing, because the caller is still holding it, but it
-   * does guarantee the next identical request re-reads it.
-   *
-   * **Try a bigger {@link maxSize} first.** @gmod/cram adopted `'batch'` on a
-   * 117ms-against-12ms measurement and then dropped it again, and the sequence
-   * is the useful part. That measurement was taken with a budget 2.75x *below*
-   * the request's working set. Raising the budget above the working set made
-   * the two policies measurably identical — same re-read counts, times inside
-   * noise — because a request that fits has nothing to evict mid-flight
-   * whichever policy is in force. @gmod/bam measured the same thing from the
-   * other side: on a pan workload over an undersized budget, `'batch'` did not
-   * rescue it at all, matching `'lru'` re-read for re-read while retaining 1.7x
-   * the memory.
-   *
-   * So `'batch'` only changes anything when a batch exceeds the budget, and
-   * what it does there is exceed the budget: cram measured it holding 420,000
-   * records against a stated limit of 20,000. That is the documented trade — a
-   * batch touching more than the whole budget leaves the cache over it until
-   * the next batch lands — and it is worth being clear that it is the whole
-   * mechanism, not a side effect. A consumer lowering the budget to constrain
-   * memory will not get what it asked for.
-   *
-   * Reach for it when a too-small budget is genuinely forced on you and the
-   * workload is repeated identical requests. Otherwise size the budget above
-   * one request and leave this alone.
-   */
-  evictionPolicy?: 'lru' | 'batch'
   /**
    * A budget shared with other caches, evicted globally least-recently-used
    * across all of them. Defaults to none.
@@ -247,11 +198,6 @@ export class SharedReadCache<K, V> implements BudgetMember {
   private fill?: (key: K, signal: AbortSignal) => Promise<V>
   private sizeOf: (value: V) => number
   private toCacheKey: (key: K) => string
-  private evictionPolicy: 'lru' | 'batch'
-  /** reads still in flight, so the batch policy knows when the batch is done */
-  private pending = 0
-  /** the batch in flight; see {@link Entry.batch} */
-  private batch = 0
   private idleTimeoutMs?: number
   private sweepTimer?: ReturnType<typeof setInterval>
 
@@ -260,7 +206,6 @@ export class SharedReadCache<K, V> implements BudgetMember {
     maxSize = Infinity,
     sizeOf = () => 1,
     cacheKey = (key: K) => String(key),
-    evictionPolicy = 'lru',
     idleTimeoutMs = 0,
     budget,
     // Defaulted, because a cache with no options at all is a real shape and a
@@ -269,7 +214,6 @@ export class SharedReadCache<K, V> implements BudgetMember {
     // every one of them was written `new SharedReadCache({})`.
   }: SharedReadCacheOptions<K, V> = {}) {
     this.fill = fill
-    this.evictionPolicy = evictionPolicy
     this.limit = maxSize
     this.budget = budget
     this.membership = budget?.register(this)
@@ -464,9 +408,6 @@ export class SharedReadCache<K, V> implements BudgetMember {
   }
 
   clear() {
-    for (const entry of this.entries.values()) {
-      this.detach(entry)
-    }
     this.entries.clear()
     this.charge(-this.total)
     this.total = 0
@@ -493,7 +434,6 @@ export class SharedReadCache<K, V> implements BudgetMember {
     // re-insert so Map iteration order stays least-recently-used first
     this.entries.delete(cacheKey)
     this.entries.set(cacheKey, entry)
-    entry.batch = this.batch
     entry.lastTouched = Date.now()
     entry.seq = this.stamp()
   }
@@ -604,17 +544,13 @@ export class SharedReadCache<K, V> implements BudgetMember {
       controller,
       dispose: new AbortController(),
       settled: false,
-      counted: true,
       size: 0,
-      batch: this.batch,
       lastTouched: Date.now(),
       seq: this.stamp(),
     }
     this.entries.set(cacheKey, entry)
-    this.pending++
     const settle = () => {
       entry.settled = true
-      this.detach(entry)
       // nothing reads these once the read has settled, and holding them would
       // pin each caller's AbortController behind this entry
       entry.dispose.abort()
@@ -659,7 +595,7 @@ export class SharedReadCache<K, V> implements BudgetMember {
             this.startSweep()
           }
         }
-        this.maybeEvict()
+        this.evictAfterSettle()
       },
       () => {
         // a failed read caches nothing, so the next caller starts over rather
@@ -669,7 +605,7 @@ export class SharedReadCache<K, V> implements BudgetMember {
           this.deleteKey(cacheKey)
         }
         settle()
-        this.maybeEvict()
+        this.evictAfterSettle()
       },
     )
     return entry
@@ -753,14 +689,6 @@ export class SharedReadCache<K, V> implements BudgetMember {
           entry.signals.delete(signal)
           if (!entry.pinned && entry.signals.size === 0) {
             entry.controller.abort(signal.reason)
-            // Nobody is waiting on this read any more, so nobody is holding
-            // its value, so it is not what the batch policy defers eviction
-            // for. Left counted it was: the policy waits for `pending` to
-            // reach zero, and a read cancelled against a transport that
-            // ignores its signal never settles to decrement it — one stalled
-            // fetch and the cache never evicted again, however far over the
-            // budget it went.
-            this.detach(entry)
           }
         },
         // `once` covers the abort firing; `dispose` covers it never firing.
@@ -775,30 +703,11 @@ export class SharedReadCache<K, V> implements BudgetMember {
     const entry = this.entries.get(cacheKey)
     if (entry) {
       this.entries.delete(cacheKey)
-      // An entry the cache no longer holds is not part of any batch of its
-      // reads, whether it has settled or not; see detach.
-      this.detach(entry)
       if (entry.settled) {
         this.settledCount--
       }
       this.total -= entry.size
       this.charge(-entry.size)
-    }
-  }
-
-  /**
-   * Stop counting a read among the {@link pending} ones the batch policy waits
-   * for. Idempotent, because a read can leave that count either by settling or
-   * by the cache giving up on it first, and both can happen to the same read.
-   *
-   * The read itself is untouched: a caller still awaiting one the cache has
-   * dropped gets its value as normal. What ends is only its claim on the batch,
-   * which it has no business holding open once nothing will use the result.
-   */
-  private detach(entry: Entry<V>) {
-    if (entry.counted) {
-      entry.counted = false
-      this.pending--
     }
   }
 
@@ -848,50 +757,17 @@ export class SharedReadCache<K, V> implements BudgetMember {
    * than the whole budget is still worth holding — the caller needs it for the
    * request in flight, so dropping it only buys an immediate re-read.
    */
-  // Under the batch policy nothing is evicted until the whole batch has
-  // settled: a request that starts many reads at once is still holding all of
-  // their values, so evicting one frees nothing and only costs a re-read.
-  private maybeEvict() {
-    if (this.evictionPolicy === 'lru' || this.pending === 0) {
-      this.evict()
-      // Ends the batch, and belongs here rather than in evict() because ending
-      // one is what *settling* the last read of it means. Down in evict() it
-      // also ran on the maxSize setter, which ends a batch still in flight: its
-      // entries then age out the instant they settle, so a consumer shedding
-      // memory mid-request silently got lru behaviour out of a batch cache. It
-      // sat below evict()'s `limit === Infinity` guard too, so a batch cache
-      // that started unbounded never advanced at all, and imposing a budget on
-      // one later spared every entry it had ever held.
-      //
-      // Bumping the number the survivors are compared against ages every one of
-      // them out at once, where clearing a mark per entry was O(entries) on
-      // every batch — including the batches under budget, which reach here only
-      // to do that.
-      if (this.evictionPolicy === 'batch') {
-        this.batch++
-      }
-      // after the local pass, so a cache that can get under its own ceiling
-      // does that first and only then competes for the shared one
-      this.budget?.evict()
-    }
+  private evictAfterSettle() {
+    this.evict()
+    // after the local pass, so a cache that can get under its own ceiling
+    // does that first and only then competes for the shared one
+    this.budget?.evict()
   }
 
   private evict() {
     if (this.limit === Infinity) {
       return
     }
-    if (this.evictionPolicy === 'batch') {
-      for (const [cacheKey, entry] of this.entries) {
-        if (this.total <= this.limit) {
-          break
-        }
-        if (entry.batch !== this.batch && entry.settled) {
-          this.deleteKey(cacheKey)
-        }
-      }
-      return
-    }
-
     // Before the loop below, which a cache comfortably under its budget would
     // otherwise enter and leave for nothing on every settle.
     if (this.total <= this.limit) {

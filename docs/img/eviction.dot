@@ -17,22 +17,18 @@ digraph eviction {
   setmax  [label="cache.maxSize = n\nbudget.limit = n" fillcolor="#ddf4ff" color="#0969da"]
   manual  [label="delete() / clear()" fillcolor="#ddf4ff" color="#0969da"]
 
-  pendcheck [label="batch policy:\nany read still in flight?"]
   evict   [label="evict to maxSize\nleast-recently-used first" fillcolor="#fff8c5" color="#9a6700"]
   bevict  [label="SharedBudget.evict()\nglobally least-recently-used" fillcolor="#fff8c5" color="#9a6700"]
   sweep   [label="sweepIdle()\nlastTouched older than idleTimeoutMs" fillcolor="#fff8c5" color="#9a6700"]
   gone    [label="entry dropped, weight credited back" fillcolor="#dafbe1" color="#1a7f37"]
   keep    [label="skipped: a read still in flight" fillcolor="#fbefff" color="#8250df"]
   last    [label="kept: the last settled entry" fillcolor="#fbefff" color="#8250df"]
-  spared  [label="spared until the batch drains" fillcolor="#fbefff" color="#8250df"]
 
-  settle -> pendcheck
-  pendcheck -> evict [label=" no, or 'lru' policy "]
-  pendcheck -> spared [style=dashed label=" yes "]
+  settle -> evict
   setmax -> evict
   setmax -> bevict
   timer -> sweep
-  evict -> bevict [label=" then "]
+  evict -> bevict [label=" then, on settle "]
   evict -> gone
   bevict -> gone
   sweep -> gone

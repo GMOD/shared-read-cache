@@ -42,14 +42,14 @@ small and few. indexedfasta's is the degenerate case, and a real one:
 - **Why a per-file ceiling bounds nothing, and what an equal split cost** —
   [bam-js ADR 0018](https://github.com/GMOD/bam-js/blob/main/agent-docs/adr/0018-a-per-file-ceiling-is-not-a-bound-on-a-consumer-with-many-files.md).
   That ADR is why `SharedBudget` exists.
-- **Both sides of the batch policy** — cram-js adopted it and then dropped it
+- **Why the batch eviction policy is gone** — cram-js adopted it and then
+  dropped it
   ([ADR 0005](https://github.com/GMOD/cram-js/blob/main/docs/adr/0005-drop-the-batch-eviction-policy.md),
   and
   [docs/memory.md](https://github.com/GMOD/cram-js/blob/main/docs/memory.md#the-slice-cache)
   for the slice cache it bounded); bam-js measured that it did not transfer
-  ([ADR 0013](https://github.com/GMOD/bam-js/blob/main/agent-docs/adr/0013-the-batch-eviction-policy-does-not-transfer.md)).
-  The option is still here because the workload it is for is real, but no
-  consumer currently sets it.
+  ([ADR 0013](https://github.com/GMOD/bam-js/blob/main/agent-docs/architecture-decision-records/0013-the-batch-eviction-policy-does-not-transfer.md)).
+  With no consumer left, 2.0 removed the option.
 - **What a budget does _not_ bound** — the "none of them bound peak memory"
   sections of both caching docs. Reads in flight, the query's own hold on what
   it parsed, and fields memoized onto a record after it was weighed (bam
