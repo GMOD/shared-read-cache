@@ -1,3 +1,23 @@
+## [2.0.0](https://github.com/GMOD/shared-read-cache/compare/v1.7.2...v2.0.0) (2026-10-09)
+
+### Bug Fixes
+
+- Remove abort listeners by reference so a GC cannot orphan them ([b548103](https://github.com/GMOD/shared-read-cache/commit/b5481037868cb4d33a1cd8f9dccbdf3b111a081f))
+- The idle sweep timer holds its cache weakly, and never overflows ([d32bfd5](https://github.com/GMOD/shared-read-cache/commit/d32bfd5d751d52076978d9578015c93aef3766b0))
+- Settled entries drop their abort state; harden fill and sizeOf ([0fdd4c1](https://github.com/GMOD/shared-read-cache/commit/0fdd4c13842884cbc8988cf9047d5f36d5921158))
+
+### Documentation
+
+- Say it in full sentences ([fd727e9](https://github.com/GMOD/shared-read-cache/commit/fd727e9847451d312fec082602aa697ae5ed7c4b))
+- Fix agency, contrastive framing, clefts, and stacked personification ([1c53921](https://github.com/GMOD/shared-read-cache/commit/1c539216e117e1c3d7646e0f0fb47e56091dda63))
+- Format api.md ([0bdf694](https://github.com/GMOD/shared-read-cache/commit/0bdf6940e4f855cbcebef460934b02357df12680))
+- Correct what consumers weigh, the idle sweep, and dead links ([0c39147](https://github.com/GMOD/shared-read-cache/commit/0c39147e0edc511e17d71eacd3cedf6feff3fbd5))
+
+### Features
+
+- **BREAKING** Remove the batch eviction policy ([c8f9ea7](https://github.com/GMOD/shared-read-cache/commit/c8f9ea7fc1eebf8834347571e43b6c2a4a716150))
+- Export structural Budget and BudgetMembership interfaces ([a114513](https://github.com/GMOD/shared-read-cache/commit/a11451351228e2138a3648ce4b78d2a50d836b8b))
+
 ## [1.7.2](https://github.com/GMOD/shared-read-cache/compare/v1.7.1...v1.7.2) (2026-08-21)
 
 ### Bug Fixes
