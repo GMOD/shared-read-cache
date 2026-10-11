@@ -21,11 +21,9 @@ const cache = new SharedReadCache({
 const data = await cache.get(chunk, opts.signal)
 ```
 
-This package caches what a read produced, keyed however you like. The layer
-below it is
-[`@gmod/range-cache-filehandle`](https://github.com/GMOD/range-cache-filehandle),
-which does the same sort of thing for the raw bytes, caching HTTP byte ranges
-underneath a filehandle.
+This package caches what a read produced, keyed however you like.
+[`@gmod/range-cache-filehandle`](https://github.com/GMOD/range-cache-filehandle)
+sits below it and caches the raw HTTP byte ranges underneath a filehandle.
 
 ## Docs
 
@@ -41,8 +39,7 @@ underneath a filehandle.
 
 ## Budgets are opt-in
 
-There is no default limit. What a sensible one is depends entirely on what you
-are caching:
+There is no default limit, because a sensible one depends on what you cache:
 
 ```js
 const cache = new SharedReadCache({
@@ -53,23 +50,27 @@ const cache = new SharedReadCache({
 })
 ```
 
-A budget bounds _retained_ memory, not request size. The cache never turns a
-value away for being too large: one bigger than the whole budget still goes in,
-eviction never touches a read in flight, and it only discards values it has
-already handed back once — so the worst a budget can cost is a re-read.
+A budget bounds _retained_ memory, not request size:
 
-Unbounded is the permissive default, not the safe one. With no budget the cache
-grows for the life of the object; `@gmod/tabix` measured 2GB RSS panning a dense
-VCF before it bounded this. Pass one if the values are large or the object is
-long-lived. `cache.maxSize = n` later evicts immediately, which is how a
-consumer sheds memory under pressure.
+- The cache never turns a value away for being too large. A value bigger than
+  the whole budget still goes in.
+- Eviction never touches a read in flight.
+- Eviction only discards values the cache has already handed back once, so the
+  worst a budget can cost is a re-read.
+
+With no budget the cache grows for the life of the object. `@gmod/tabix`
+measured 2GB RSS panning a dense VCF before it bounded this. Pass a budget if
+the values are large or the object is long-lived.
+
+Setting `cache.maxSize = n` later evicts immediately, so a consumer can shed
+memory under pressure.
 
 ## `idleTimeoutMs` — reclaiming while nothing is happening
 
-The cache checks `maxSize` when a read settles, so an idle one sits at whatever
-level it reached and never gives it back. For an object that lives as long as
-its UI — a genome browser parked on a region, times every open track — that
-resting level is the memory that matters, and no budget alone will lower it.
+The cache checks `maxSize` when a read settles, so an idle cache stays at the
+level it reached. For an object that lasts as long as its UI, such as a genome
+browser parked on a region across every open track, that resting level is the
+memory that matters, and no budget alone lowers it.
 
 ```js
 const cache = new SharedReadCache({
@@ -80,75 +81,80 @@ const cache = new SharedReadCache({
 })
 ```
 
-`maxSize` and `idleTimeoutMs` answer different questions, and they work best
-together. Set `maxSize` generously: below one request's working set, it caches
-_nothing_ — each value falls out before the next request can reuse it, while the
-ones in flight hold their memory anyway. `idleTimeoutMs` makes a generous
-ceiling affordable by turning it into a peak, not a resting level.
+Use the two options together:
 
-The clock runs from the last **read** of an entry, or from its fill settling if
-nothing has read it since, so something fetched once and used every second never
-expires — and a slow read still gets the full timeout to be reused in, rather
-than spending it on its own download. The sweep skips reads in flight.
-`cache.sweepIdle()` reclaims on demand — on a tab going hidden, say — rather
-than waiting for the interval.
+- Set `maxSize` generously. Below one request's working set it caches _nothing_:
+  each value falls out before the next request can reuse it, while the reads in
+  flight hold their memory anyway.
+- `idleTimeoutMs` makes a generous ceiling affordable, because memory peaks
+  under load and falls back when idle.
 
-The sweep runs only while it has something to reclaim: the first read to settle
-arms it, and the first sweep that finds no settled entry stops it. The timer
-holds its cache weakly, so a cache you drop is collected without a `dispose()`
-call, and it `unref`s itself where that exists, so it never holds a Node process
-open.
+How the idle clock works:
+
+- It runs from the last **read** of an entry, or from the fill settling if
+  nothing has read it since.
+- An entry fetched once and used every second never expires.
+- A slow read still gets the full timeout for reuse after its download ends.
+- The sweep skips reads in flight.
+- `cache.sweepIdle()` reclaims on demand, for example when a tab goes hidden.
+
+The sweep timer:
+
+- The first read to settle arms it, and the first sweep that finds no settled
+  entry stops it.
+- It holds its cache weakly, so a dropped cache is collected without a
+  `dispose()` call.
+- It calls `unref` where that exists, so it never holds a Node process open.
 
 ## One budget across several caches
 
-A per-cache ceiling does not bound a consumer that opens many caches: one cache
-per open file, each sized so a single one never thrashes, and the count
-multiplies. `SharedBudget` bounds them in aggregate, evicting whatever is
-globally least-recently-used, so an idle cache hands its space to a busy one:
+A per-cache ceiling does not bound a consumer that opens many caches, such as
+one per open file. `SharedBudget` bounds them in aggregate and evicts the
+globally least-recently-used entry, so an idle cache hands its space to a busy
+one:
 
 ```js
 const budget = new SharedBudget(1024 * 2 ** 20)
 const cache = new SharedReadCache({ budget, sizeOf, fill })
 ```
 
-`SharedBudget` composes with `maxSize` rather than replacing it, holds its
-members weakly so there is no `unregister` to forget, and needs every member to
-measure size in the same unit, because a budget that adds one cache's bytes to
-another's entry counts bounds neither. [docs/memory.md](docs/memory.md) has what
-dividing a ceiling by the file count measured instead.
+- `SharedBudget` works alongside `maxSize`; it does not replace it.
+- It holds its members weakly, so there is no `unregister` to call.
+- Every member must measure size in the same unit. Adding one cache's bytes to
+  another's entry counts bounds neither.
+
+[docs/memory.md](docs/memory.md) has the measurement for dividing a ceiling by
+the file count instead.
 
 ## Why `sizeOf`
 
-This package exists because four gmod packages each hand-rolled the same cache,
-identical except for how they weighed an entry: `@gmod/bam` and `@gmod/tabix`
-weigh decompressed bytes, `@gmod/bbi` weighs entries, and `@gmod/cram` first
-weighed decoded records and now weighs bytes. The cache cannot call `sizeOf`
-until a read settles, so a cache that budgets this way has to own its entries —
-which is why a plain-LRU-backed package could not serve them and each wrote its
-own.
+`sizeOf` weighs a settled value against the budget. Omit it and the budget
+counts entries.
 
-Omit `sizeOf` and the budget counts entries.
+Four gmod packages hand-rolled this cache, differing only in how they weighed an
+entry: `@gmod/bam` and `@gmod/tabix` weigh decompressed bytes, `@gmod/cram`
+weighs bytes, and `@gmod/bbi` weighs entries. The cache can only call `sizeOf`
+once a read settles, so a cache that budgets this way has to own its entries,
+which a plain LRU package could not do.
 
 ## Behaviour worth knowing
 
-- A caller with no signal pins the read: with no signal, it can never abort, so
-  aborting every other caller still doesn't stop the read. One signal-free
-  consumer therefore makes that read uncancellable for everyone joined to it.
+- A caller with no signal pins the read. It can never abort, so aborting every
+  other caller does not stop the read, and the read is uncancellable for
+  everyone joined to it.
 - The cache drops a rejection rather than caching it, so one transient failure
   does not poison the key for the life of the cache.
 - The last settled entry survives any budget. A value larger than the whole
   budget is still worth holding; dropping it only costs an immediate re-read.
-- Eviction never touches a read in flight, because it is still a promise, not a
-  settled result, and dropping it would lose the de-duplication its callers rely
-  on.
+- Eviction never touches a read in flight. Dropping the promise would lose the
+  de-duplication its callers rely on.
 
 ## Relationship to `@gmod/abortable-promise-cache`
 
-`@gmod/abortable-promise-cache` was this module's earlier inspiration. This
-replaces it, and fixes two things that package got wrong:
+This package replaces `@gmod/abortable-promise-cache`, which had two bugs:
 
-- it never took a listener back off a caller's signal, so a long-lived signal
-  accumulated one per key it ever touched
-- it registered a caller that arrived already aborted as a waiter, and an abort
-  listener never fires on an already-aborted signal — so the count could never
-  reach zero and the read turned uncancellable for everyone joined to it
+- It never removed its listener from a caller's signal, so a long-lived signal
+  accumulated one per key.
+- It counted a caller that arrived already aborted as a waiter. An abort
+  listener never fires on an already-aborted signal, so the count never reached
+  zero and the read became uncancellable for everyone joined to it.
