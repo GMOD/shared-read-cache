@@ -16,6 +16,11 @@ pnpm version patch  # or minor/major
 CHANGELOG.md with git-cliff, then pushes the tag, which triggers the publish
 workflow.
 
+[docs/api.md](docs/api.md) is written by hand, and `test/apiDocs.test.ts` fails
+when a public member of `SharedReadCache`, `SharedBudget`, their options and
+budget interfaces, or an export, is missing from it. Document the new member, or
+add it to the test's `undocumented` list with the reason it is internal.
+
 ## Diagrams
 
 `docs/img/*.svg` is generated from the `.dot` beside it and committed, since

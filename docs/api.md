@@ -16,6 +16,9 @@ read returns. `cacheKey` maps the first to a string; `sizeOf` weighs the second.
 Every option is optional, and so is the object. `new SharedReadCache({})` is
 common: a memo whose fill is a closure passed per `get()` call.
 
+The package exports the type of the options object as
+`SharedReadCacheOptions<K, V>`.
+
 | option              | default       | what it does                                                                                                                                                                                                                                                                                                                                      |
 | ------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `fill(key, signal)` | none          | Performs the read, under the **shared** signal — it fires only once every caller waiting on this key has aborted, never one caller's own. Either this or a per-call `fill` must be present.                                                                                                                                                       |
@@ -128,3 +131,6 @@ class so that the budget and the cache can come from two installs of this
 package — an application creating the budget and `@gmod/bam` constructing the
 cache, say — where a class with private fields would not typecheck against its
 own copy. `BudgetMembership` is the handle `register` returns.
+
+`BudgetMembership` has one field, `held`: the weight its member currently adds
+to the budget's total. `SharedBudget`'s `charge` adds `delta` to it.
