@@ -1,3 +1,14 @@
+## [2.0.1](https://github.com/GMOD/shared-read-cache/compare/v2.0.0...v2.0.1) (2026-10-11)
+
+### Documentation
+
+- Plainer README wording ([5627dff](https://github.com/GMOD/shared-read-cache/commit/5627dff77738f79f954b2a6587a541017e73358c))
+- Break up README walls of text ([c28f19e](https://github.com/GMOD/shared-read-cache/commit/c28f19e7b3d3bc283647f56b623da83ffe36a7af))
+
+### Tests
+
+- Fail when docs/api.md misses a public member or export ([2bf4e7b](https://github.com/GMOD/shared-read-cache/commit/2bf4e7b50146ffc3cb426c838aece233894d6a28))
+
 ## [2.0.0](https://github.com/GMOD/shared-read-cache/compare/v1.7.2...v2.0.0) (2026-10-09)
 
 ### Bug Fixes
