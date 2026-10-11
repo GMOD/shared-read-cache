@@ -111,11 +111,11 @@ const budget = new SharedBudget(1024 * 2 ** 20)
 const cache = new SharedReadCache({ budget, sizeOf, fill })
 ```
 
-It composes with `maxSize` rather than replacing it, it holds its members weakly
-so there is no `unregister` to forget, and every member must weigh in the same
-unit — a budget adding one cache's bytes to another's entry counts bounds
-neither. [docs/memory.md](docs/memory.md) has what dividing a ceiling by the
-file count measured instead.
+`SharedBudget` composes with `maxSize` rather than replacing it, holds its
+members weakly so there is no `unregister` to forget, and needs every member to
+measure size in the same unit, because a budget that adds one cache's bytes to
+another's entry counts bounds neither. [docs/memory.md](docs/memory.md) has what
+dividing a ceiling by the file count measured instead.
 
 ## Why `sizeOf`
 
