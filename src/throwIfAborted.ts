@@ -1,19 +1,7 @@
 /**
- * Throws if `signal` has been aborted, matching the semantics of
- * `signal.throwIfAborted()` without requiring either that method or `reason`.
- *
- * Two reasons not to call the built-in directly. It assumes a *real*
- * `AbortSignal`, and callers pass duck-typed ones — `@gmod/bam`'s
- * `test/csi.test.ts` casts a bare `{ aborted }` through `as AbortSignal`, which
- * is a fair model of what consumers do. Calling a missing method there is a
- * `TypeError` rather than the cancellation the caller asked for, which is a
- * strictly worse failure.
- *
- * And it sets a browser floor. `AbortSignal.prototype.throwIfAborted` and
- * `AbortSignal.reason` are Safari 15.4 / Chrome 100 / Firefox 97 (March 2022),
- * higher than the consumers of this package otherwise need — they touch only
- * `.aborted`, and `generic-filehandle2` only forwards a signal to `fetch`. A
- * few lines here keep that floor where it was.
+ * Throws if `signal` has been aborted, like `signal.throwIfAborted()`, but
+ * also for a duck-typed `{ aborted }` signal and on browsers that predate that
+ * method. See docs/api.md.
  */
 export function throwIfAborted(signal?: AbortSignal) {
   if (signal?.aborted) {
@@ -22,18 +10,8 @@ export function throwIfAborted(signal?: AbortSignal) {
 }
 
 /**
- * What an aborted `signal` should be reported as.
- *
- * Spec-faithful: `throwIfAborted` throws `reason` verbatim, and `reason` is
- * whatever the caller passed to abort() — `controller.abort('too slow')` makes
- * it a string. Coercing it to an Error here would hide that from a consumer who
- * set it deliberately.
- *
- * Separate from the throw so a caller that has to *reject* with it rather than
- * throw it reports cancellation identically; see `SharedReadCache.settleFor`.
- *
- * Annotated `unknown` rather than inferred, because the inference narrows to
- * something only-throw-error rejects and this value is thrown.
+ * `signal.reason` verbatim, even a string, or an `AbortError` when there is
+ * none. Annotated `unknown` because only-throw-error rejects the inferred type.
  */
 export function abortReason(signal: AbortSignal): unknown {
   const reason: unknown = signal.reason

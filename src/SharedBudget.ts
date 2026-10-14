@@ -1,18 +1,10 @@
-/**
- * What a {@link SharedBudget} needs from a cache. Implemented by
- * {@link SharedReadCache}; there is no reason for a consumer to write one.
- */
+/** What a {@link SharedBudget} needs from a cache. */
 export interface BudgetMember {
   /**
-   * The least-recently-used settled entry this member is willing to give up,
-   * or `undefined` if it has none to spare. `last` is true when that entry is
-   * the member's only settled one.
-   *
-   * Without `offerLast` a member keeps its last settled entry. A budget passes
-   * it, because one kept entry per member lets N members hold N entries
-   * whatever the limit; the budget keeps one across all its members instead.
-   * Both the parameter and `last` are optional, so a member and a budget from
-   * different versions of this package still pair up.
+   * The least-recently-used settled entry this member will give up, with
+   * `last` set when it is the member's only one. Without `offerLast` a member
+   * keeps its last entry. Both are optional so that members and budgets from
+   * different installs of this package still pair up.
    */
   lruSpare(
     offerLast?: boolean,
@@ -21,157 +13,58 @@ export interface BudgetMember {
   release(cacheKey: string): void
 }
 
-/**
- * The handle a member reports its weight through. Opaque to the member: it
- * passes back to {@link Budget.charge} the one {@link Budget.register} gave it.
- */
+/** The handle a member reports its weight through. */
 export interface BudgetMembership {
   /** weight this member currently contributes to the budget's total */
   held: number
 }
 
 /**
- * What a {@link SharedReadCache} needs from the budget it joins, and the type
- * of its `budget` option.
- *
- * An interface rather than the {@link SharedBudget} class so that the budget
- * and the cache need not come from one copy of this package. An application
- * creates the budget from its own install and hands it to caches constructed
- * inside `@gmod/bam` or `@gmod/tabix` from theirs; a class with private fields
- * is nominal, so two installs of even the same version would not typecheck
- * against each other. Changing this interface breaks that pairing at runtime,
- * so it is semver-major surface.
+ * The type of a cache's `budget` option. An interface rather than the
+ * {@link SharedBudget} class, so the budget and its caches can come from
+ * different installs of this package; changing it is a breaking change.
  */
 export interface Budget {
   register(member: BudgetMember): BudgetMembership
-  /** Adjust a member's contribution, and the total with it. */
   charge(membership: BudgetMembership, delta: number): void
   /** The next stamp in the recency order shared by every member. */
   nextSeq(): number
-  /** Evict globally least-recently-used entries until back under the limit. */
   evict(): void
 }
 
-/**
- * The budget keeps this so that a cache which has been collected can still have
- * its last known weight subtracted from the total.
- */
 interface Membership extends BudgetMembership {
   ref: WeakRef<BudgetMember>
 }
 
 /**
  * One memory budget shared by several caches, evicting globally
- * least-recently-used across all of them.
- *
- * ## Why this exists
- *
- * {@link SharedReadCacheOptions.maxSize} is per cache, and a consumer that
- * opens one cache per file multiplies it. @gmod/bam's 1 GB default is sized so
- * a single track's pan never thrashes; jbrowse holds one `BamFile` per open
- * track, so three moderately deep alignments tracks browsing eight windows
- * measured 1109 MB retained and 1665 MB RSS — with **no cache anywhere near
- * its own ceiling**, so not one byte of that was the budget's doing. Per-file
- * ceilings do not bound a consumer that scales the number of files.
- *
- * ## Why not just divide the ceiling by the file count
- *
- * Because that walks into the cliff the per-file number exists to avoid. A
- * budget below one query's working set does not cache less, it caches
- * *nothing* — each value is evicted before the next pan can reuse it, so the
- * hit rate is zero and the memory is retained anyway. On that same three-track
- * workload, 1 GB split as 342 MB each cost 16 refills on the revisit; split
- * eight ways as 128 MB each it cost 101, against 98 for the cold pass. Worse
- * than no cache at all.
- *
- * A shared budget does not have that failure, because a member yields only
- * what is globally least-recently-used. Tracks the reader is not looking at
- * age out and hand their space to the one being panned, so the active track
- * keeps a working set whatever the track count — which is exactly what an
- * equal split cannot do.
- *
- * ## Every member must weigh in the same unit
- *
- * {@link total} is a sum over members, so it means nothing unless their
- * {@link SharedReadCacheOptions.sizeOf} agree. This is not hypothetical across
- * these packages: @gmod/bam, @gmod/tabix and @gmod/cram weigh decompressed
- * bytes, while @gmod/bbi, @gmod/nclist and @gmod/hic weigh entries. A budget
- * holding a bam cache and a bbi cache would be adding bytes to entries and
- * bounding neither.
- *
- * Nothing here can check that, since `sizeOf` is opaque by design. Group
- * members by unit and give each group its own budget.
- *
- * ## Members are held weakly
- *
- * A long-lived budget must never be the reason a cache stays reachable. The
- * consumer this is for keeps one budget per worker and one cache per open
- * track, and closing a track reclaims by dropping the last strong reference to
- * the adapter — a budget holding its members strongly would silently convert
- * that into a leak, which is the exact bug it is meant to prevent. So the
- * budget holds a `WeakRef` to each cache and its last known weight beside it;
- * a collected member is pruned, and its weight credited back, on the next
- * eviction pass. No `unregister` call for a consumer to forget.
+ * least-recently-used across all of them. Every member must weigh in the same
+ * unit. Members are held weakly, and a collected member's weight is credited
+ * back on the next pass. See docs/memory.md.
  */
 export class SharedBudget implements Budget {
   private members = new Set<Membership>()
   private budgetLimit: number
-  /**
-   * Ticks on every touch across every member, giving the total order over
-   * entries that {@link evict} picks its victim by.
-   *
-   * `lastTouched` cannot do that job. `Date.now()` has millisecond resolution,
-   * so a burst of cache hits inside one millisecond all carry the same stamp,
-   * and a tie resolves to whichever member happened to be scanned last rather
-   * than to anything about recency. Wall-clock is still what a cache's idle
-   * sweep needs, so the two coexist: one answers "how long since", the other
-   * "which came first".
-   *
-   * It lives here, on the object the members share, rather than in a module
-   * variable beside the cache. This package ships an ESM build and a CJS one,
-   * so a consumer whose dependency graph reaches both gets two copies of that
-   * module and two counters, each starting at zero — and members from the two
-   * then offered this budget colliding stamps. Measured on one budget holding
-   * a cache from each build: it evicted the second-newest entry of seven and
-   * kept the genuinely oldest, which is the below-the-working-set cliff this
-   * class exists to avoid, arrived at through a build artifact rather than
-   * through any configuration. A shared budget is by definition one object, so
-   * a counter on it is one counter however many copies of the class exist.
-   */
+  // a module-level counter would exist twice when a consumer loads both the
+  // ESM and CJS builds; see docs/memory.md
   private seq = 0
-
   private heldTotal = 0
-
-  /**
-   * Sum of the settled weight held across every member.
-   *
-   * An accessor, because a member that has been collected owes nothing and this
-   * is the number a consumer reports memory from. As a plain field it was only
-   * corrected when something happened to call {@link prune} — {@link evict} or
-   * {@link size} — so a budget sitting under its limit, which is a budget with
-   * no reason to evict, went on counting caches that no longer exist for as
-   * long as nothing else happened. That is the same 10,200-against-400 the
-   * pruning order inside {@link evict} was fixed for, reached by sitting still
-   * rather than by having no limit.
-   */
-  get total() {
-    this.prune()
-    return this.heldTotal
-  }
 
   constructor(limit: number) {
     this.budgetLimit = limit
+  }
+
+  /** Settled weight held across every live member. */
+  get total() {
+    this.prune()
+    return this.heldTotal
   }
 
   get limit() {
     return this.budgetLimit
   }
 
-  /**
-   * Accessor rather than a plain field for the same reason
-   * {@link SharedReadCache.maxSize} is one: lowering the budget frees memory
-   * now, rather than whenever some member next happens to settle a read.
-   */
+  /** Lowering the limit evicts now. */
   set limit(limit: number) {
     this.budgetLimit = limit
     this.evict()
@@ -183,26 +76,17 @@ export class SharedBudget implements Budget {
     return this.members.size
   }
 
-  /**
-   * Enrol a cache. Returns the handle it reports its weight through — the
-   * budget never asks a member for its weight, because a member that has been
-   * collected still owes what it held.
-   */
   register(member: BudgetMember): BudgetMembership {
     const membership = { held: 0, ref: new WeakRef(member) }
     this.members.add(membership)
     return membership
   }
 
-  /**
-   * @internal — the next stamp in this budget's recency order. Members ask on
-   * every touch; nothing else should.
-   */
+  /** @internal */
   nextSeq() {
     return this.seq++
   }
 
-  /** Adjust a member's contribution, and the total with it. */
   charge(membership: BudgetMembership, delta: number) {
     membership.held += delta
     this.heldTotal += delta
@@ -210,16 +94,11 @@ export class SharedBudget implements Budget {
 
   /**
    * Evict globally least-recently-used settled entries until back under the
-   * limit, or until no member will give up another.
+   * limit, keeping reads in flight and the one newest settled entry.
    */
   evict() {
-    // Before the limit is consulted, because pruning is not part of evicting:
-    // {@link total} is a documented public number and a member that has been
-    // collected owes nothing, whether or not there is a limit to compare it
-    // against. Guarded the other way round, an unlimited budget returned here
-    // and so never pruned at all — it reported 10,200 against members actually
-    // holding 400, and kept a Membership for every cache ever registered, which
-    // is the accumulation the weak refs exist to avoid.
+    // before the limit check, so an unlimited budget still drops collected
+    // members
     this.prune()
     while (this.heldTotal > this.budgetLimit) {
       let victim: BudgetMember | undefined
@@ -236,8 +115,6 @@ export class SharedBudget implements Budget {
           }
         }
       }
-      // Everything left is a read in flight, or the one settled entry the
-      // budget keeps across all its members for the request in flight.
       if (!victim || !spare || (offers === 1 && spare.last)) {
         break
       }
@@ -245,7 +122,6 @@ export class SharedBudget implements Budget {
     }
   }
 
-  /** Drop collected members, crediting back what they were still counted for. */
   private prune() {
     for (const membership of this.members) {
       if (membership.ref.deref() === undefined) {

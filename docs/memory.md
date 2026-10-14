@@ -158,6 +158,12 @@ touch, giving a total order across _different_ caches, which a shared budget
 compares. `lastTouched` answers "how long since" and `seq` answers "which came
 first", so the cache keeps both.
 
+`SharedBudget` holds the counter, because a module-level counter can exist
+twice. A consumer whose dependency graph loads both the ESM and the CJS build
+gets two copies of the module, each counting from zero, and a cache from each
+copy then stamps entries in one budget with colliding numbers. In that setup a
+module counter evicted the second-newest entry of seven and kept the oldest.
+
 For the same reason, a read settling stamps `lastTouched` but deliberately does
 not `touch()` the entry. A read's latency is a property of the transport, not of
 how the consumer is using the cache, so ordering evictions by it preferentially
