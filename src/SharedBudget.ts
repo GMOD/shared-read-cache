@@ -5,13 +5,18 @@
 export interface BudgetMember {
   /**
    * The least-recently-used settled entry this member is willing to give up,
-   * or `undefined` if it has none to spare.
+   * or `undefined` if it has none to spare. `last` is true when that entry is
+   * the member's only settled one.
    *
-   * A member never offers its last settled entry, for the same reason a cache
-   * with a budget of its own keeps it: the caller needs that value for the
-   * request in flight, so dropping it only buys an immediate re-read.
+   * Without `offerLast` a member keeps its last settled entry. A budget passes
+   * it, because one kept entry per member lets N members hold N entries
+   * whatever the limit; the budget keeps one across all its members instead.
+   * Both the parameter and `last` are optional, so a member and a budget from
+   * different versions of this package still pair up.
    */
-  lruSpare(): { cacheKey: string; seq: number } | undefined
+  lruSpare(
+    offerLast?: boolean,
+  ): { cacheKey: string; seq: number; last?: boolean } | undefined
   /** Drop the entry {@link lruSpare} named, crediting its weight back. */
   release(cacheKey: string): void
 }
@@ -51,13 +56,8 @@ export interface Budget {
  * The budget keeps this so that a cache which has been collected can still have
  * its last known weight subtracted from the total.
  */
-class Membership implements BudgetMembership {
-  held = 0
-  readonly ref: WeakRef<BudgetMember>
-
-  constructor(member: BudgetMember) {
-    this.ref = new WeakRef(member)
-  }
+interface Membership extends BudgetMembership {
+  ref: WeakRef<BudgetMember>
 }
 
 /**
@@ -189,7 +189,7 @@ export class SharedBudget implements Budget {
    * collected still owes what it held.
    */
   register(member: BudgetMember): BudgetMembership {
-    const membership = new Membership(member)
+    const membership = { held: 0, ref: new WeakRef(member) }
     this.members.add(membership)
     return membership
   }
@@ -222,24 +222,26 @@ export class SharedBudget implements Budget {
     // is the accumulation the weak refs exist to avoid.
     this.prune()
     while (this.heldTotal > this.budgetLimit) {
-      let victimKey: string | undefined
-      let victimAt = Infinity
       let victim: BudgetMember | undefined
+      let spare: ReturnType<BudgetMember['lruSpare']>
+      let offers = 0
       for (const membership of this.members) {
         const member = membership.ref.deref()
-        const spare = member?.lruSpare()
-        if (spare && spare.seq < victimAt) {
-          victimAt = spare.seq
-          victimKey = spare.cacheKey
-          victim = member
+        const offer = member?.lruSpare(true)
+        if (member && offer) {
+          offers++
+          if (!spare || offer.seq < spare.seq) {
+            victim = member
+            spare = offer
+          }
         }
       }
-      // Everything left is a member's last settled entry or a read in flight.
-      // Both are kept whatever the budget, so this is as low as it goes.
-      if (!victim || victimKey === undefined) {
+      // Everything left is a read in flight, or the one settled entry the
+      // budget keeps across all its members for the request in flight.
+      if (!victim || !spare || (offers === 1 && spare.last)) {
         break
       }
-      victim.release(victimKey)
+      victim.release(spare.cacheKey)
     }
   }
 

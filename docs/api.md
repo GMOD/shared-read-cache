@@ -121,9 +121,11 @@ do not need, because they touch only `.aborted`.
 
 ## `BudgetMember`
 
-What a `SharedBudget` needs from a cache: `lruSpare()` and `release(cacheKey)`,
-which `SharedReadCache` implements. Exported as a type for anyone reading the
-budget's signature, not as an extension point.
+What a `SharedBudget` needs from a cache: `lruSpare(offerLast?)` and
+`release(cacheKey)`, which `SharedReadCache` implements. A budget passes
+`offerLast` so it can take a member's last entry. A member that ignores it still
+pairs with the budget, which then can't go below one entry per member. Exported
+as a type for anyone reading the budget's signature, not as an extension point.
 
 ## `Budget` / `BudgetMembership`
 

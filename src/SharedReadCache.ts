@@ -38,6 +38,11 @@ interface Entry<V> {
   seq: number
 }
 
+/** false for no signal, or a duck-typed `{ aborted }` with no listeners */
+function isSubscribable(signal?: AbortSignal): signal is AbortSignal {
+  return typeof signal?.addEventListener === 'function'
+}
+
 export interface SharedReadCacheOptions<K, V> {
   /**
    * Performs the read. It is handed the *shared* signal, which fires only once
@@ -259,7 +264,7 @@ export class SharedReadCache<K, V> implements BudgetMember {
     // A read every caller has abandoned is replaced rather than joined, since
     // joining it means inheriting a cancellation that is not this caller's.
     if (entry && this.isDoomed(entry)) {
-      this.deleteKey(cacheKey)
+      this.release(cacheKey)
       entry = undefined
     }
     if (entry) {
@@ -291,11 +296,7 @@ export class SharedReadCache<K, V> implements BudgetMember {
    * fall back to the {@link throwIfAborted} in {@link get}.
    */
   private settleFor(entry: Entry<V>, signal?: AbortSignal) {
-    if (
-      !entry.pending ||
-      signal === undefined ||
-      typeof signal.addEventListener !== 'function'
-    ) {
+    if (!entry.pending || !isSubscribable(signal)) {
       return entry.promise
     }
     let reject: (reason: unknown) => void
@@ -339,7 +340,7 @@ export class SharedReadCache<K, V> implements BudgetMember {
       return undefined
     }
     if (this.isDoomed(entry)) {
-      this.deleteKey(cacheKey)
+      this.release(cacheKey)
       return undefined
     }
     this.touch(cacheKey, entry)
@@ -357,7 +358,7 @@ export class SharedReadCache<K, V> implements BudgetMember {
   }
 
   delete(key: K) {
-    this.deleteKey(this.toCacheKey(key))
+    this.release(this.toCacheKey(key))
   }
 
   clear() {
@@ -409,7 +410,7 @@ export class SharedReadCache<K, V> implements BudgetMember {
     const cutoff = Date.now() - timeout
     for (const [cacheKey, entry] of this.entries) {
       if (!entry.pending && entry.lastTouched <= cutoff) {
-        this.deleteKey(cacheKey)
+        this.release(cacheKey)
       }
     }
     // Nothing settled left, rather than an empty map: a read that never settles
@@ -515,7 +516,7 @@ export class SharedReadCache<K, V> implements BudgetMember {
         settle()
         if (current) {
           if (size === undefined) {
-            // not deleteKey, which credits back a settled entry: this one was
+            // not release(), which credits back a settled entry: this one was
             // never counted as one
             this.entries.delete(cacheKey)
           } else {
@@ -538,9 +539,9 @@ export class SharedReadCache<K, V> implements BudgetMember {
       },
       () => {
         // A failed read caches nothing, so the next caller starts over. Dropped
-        // before settle(), so deleteKey sees the uncounted read it still is.
+        // before settle(), so release() sees the uncounted read it still is.
         if (isCurrent()) {
-          this.deleteKey(cacheKey)
+          this.release(cacheKey)
         }
         settle()
       },
@@ -574,7 +575,7 @@ export class SharedReadCache<K, V> implements BudgetMember {
   // Register a caller's interest, so the read survives until that caller has
   // given up too.
   private join(pending: PendingRead, signal?: AbortSignal) {
-    if (signal === undefined || typeof signal.addEventListener !== 'function') {
+    if (!isSubscribable(signal)) {
       // Nothing here can learn that this caller gave up — it has no signal, or
       // a duck-typed `{ aborted }` that cannot be subscribed to — so the read
       // must not be cancelled out from under it.
@@ -595,7 +596,8 @@ export class SharedReadCache<K, V> implements BudgetMember {
     }
   }
 
-  private deleteKey(cacheKey: string) {
+  /** @internal — also how a budget evicts on this cache's behalf */
+  release(cacheKey: string) {
     const entry = this.entries.get(cacheKey)
     if (entry) {
       this.entries.delete(cacheKey)
@@ -611,23 +613,18 @@ export class SharedReadCache<K, V> implements BudgetMember {
    * @internal — a budget asks; nothing else should.
    *
    * The least-recently-used settled entry, or `undefined` if this cache holds
-   * at most one.
+   * none, or only one and `offerLast` is not set.
    */
-  lruSpare() {
-    if (this.settledCount <= 1) {
+  lruSpare(offerLast = false) {
+    if (this.settledCount <= (offerLast ? 0 : 1)) {
       return undefined
     }
     for (const [cacheKey, entry] of this.entries) {
       if (!entry.pending) {
-        return { cacheKey, seq: entry.seq }
+        return { cacheKey, seq: entry.seq, last: this.settledCount === 1 }
       }
     }
     return undefined
-  }
-
-  /** @internal — a budget evicting on this cache's behalf. */
-  release(cacheKey: string) {
-    this.deleteKey(cacheKey)
   }
 
   /**
@@ -652,7 +649,7 @@ export class SharedReadCache<K, V> implements BudgetMember {
         break
       }
       if (!entry.pending) {
-        this.deleteKey(cacheKey)
+        this.release(cacheKey)
       }
     }
   }

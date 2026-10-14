@@ -12,11 +12,12 @@ aggregate, which no per-cache ceiling can do. `delete()` and `clear()` drop
 entries when the consumer asks.
 
 The three automatic mechanisms never drop a read still in flight, which has no
-weight to reclaim and whose waiters rely on its de-duplication. `maxSize` and a
-`SharedBudget` also keep a cache's last settled entry, which the caller needs
-for the request in flight; the idle sweep does not, because its purpose is to
-reclaim everything from a cache nobody is reading. So the worst any budget can
-cost is a re-read: the cache never refuses a value for being too large.
+weight to reclaim and whose waiters rely on its de-duplication. `maxSize` also
+keeps a cache's last settled entry, which the caller needs for the request in
+flight, and a `SharedBudget` keeps one across all its members; the idle sweep
+does not, because its purpose is to reclaim everything from a cache nobody is
+reading. So the worst any budget can cost is a re-read: the cache never refuses
+a value for being too large.
 
 ## Why `sizeOf`
 
@@ -133,6 +134,11 @@ Before using a `SharedBudget`, note two things:
   usually what you want, because sharing lets one busy member use most of the
   total. Each cache gets under its own ceiling first and only then competes for
   the shared one.
+- However many members it has, the budget keeps only the newest settled entry
+  once it is over its limit. Through 2.0.1 each member kept its last, so N
+  members held N entries whatever the limit. jbrowse's `jb2export batch` reached
+  3,100 MB against a 1,024 MB budget with 54 caches open, and two of its four
+  processes hit the 4 GB heap limit.
 
 The budget holds its members weakly. The consumer it was built for keeps one
 budget per worker and one cache per open track, and closing a track frees its

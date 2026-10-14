@@ -2,6 +2,8 @@ import { expect, test, vi } from 'vitest'
 
 import { SharedBudget, SharedReadCache } from '../src/index.ts'
 
+import type { BudgetMember } from '../src/index.ts'
+
 /** A cache of fixed-weight values, so a budget is countable in entries. */
 function weighed(budget: SharedBudget, weight: number) {
   return new SharedReadCache<string, string>({
@@ -96,20 +98,59 @@ test('an idle member yields its space to a busy one', async () => {
   expect(budget.total).toBe(500)
 })
 
-test('a member keeps its last settled entry whatever the budget', async () => {
+test('the budget keeps one settled entry across all members', async () => {
   const budget = new SharedBudget(100)
-  const a = weighed(budget, 100)
-  const b = weighed(budget, 100)
+  const a = weighed(budget, 150)
+  const b = weighed(budget, 150)
 
   await a.get('a1')
   await b.get('b1')
 
-  // both are over the shared budget together, but neither will give up its
-  // only entry -- the caller needs it for the request in flight
-  expect(a.size).toBe(1)
+  // the newest entry stays even though it alone is over the budget -- the
+  // caller needs it for the request in flight -- but a1 is nobody's
+  expect(a.size).toBe(0)
   expect(b.size).toBe(1)
-  expect(budget.total).toBe(200)
+  expect(budget.total).toBe(150)
+})
+
+// jbrowse's `jb2export batch` reached 3,100 MB against a 1,024 MB budget
+// when each of 54 caches kept its own last entry.
+test('many single-entry members do not multiply the budget', async () => {
+  const budget = new SharedBudget(100)
+  const caches = Array.from({ length: 54 }, () => weighed(budget, 60))
+  for (const cache of caches) {
+    await cache.get('slice')
+  }
+  expect(budget.total).toBe(60)
+  expect(caches.at(-1)!.size).toBe(1)
+})
+
+test('without offerLast a member still keeps its last entry', async () => {
+  const budget = new SharedBudget(Infinity)
+  const a = weighed(budget, 100)
+  await a.get('a1')
   expect(a.lruSpare()).toBeUndefined()
+  expect(a.lruSpare(true)).toMatchObject({ cacheKey: 'a1', last: true })
+})
+
+// A budget and a cache from two installs of this package, where the member
+// predates offerLast and never offers its last entry.
+test('pairs with a member that ignores offerLast', async () => {
+  const budget = new SharedBudget(100)
+  const current = weighed(budget, 100)
+  const legacy = weighed(budget, 100)
+  const lruSpare = legacy.lruSpare.bind(legacy)
+  const legacySpare: BudgetMember['lruSpare'] = () => {
+    const spare = lruSpare()
+    return spare && { cacheKey: spare.cacheKey, seq: spare.seq }
+  }
+  legacy.lruSpare = legacySpare as typeof legacy.lruSpare
+
+  await legacy.get('l1')
+  await current.get('c1')
+  expect(legacy.size).toBe(1)
+  expect(current.size).toBe(1)
+  expect(budget.total).toBe(200)
 })
 
 test('lowering the limit evicts now, not on the next read', async () => {
@@ -128,9 +169,9 @@ test('lowering the limit evicts now, not on the next read', async () => {
   budget.limit = 200
   expect(budget.total).toBe(200)
   // the two most recent survive; the four oldest went, oldest first
-  expect(a.has('a3')).toBe(true)
+  expect(b.has('b2')).toBe(true)
   expect(b.has('b3')).toBe(true)
-  expect(a.has('a1')).toBe(false)
+  expect(a.size).toBe(0)
 })
 
 test('clearing a member credits its weight back', async () => {
