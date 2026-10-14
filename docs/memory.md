@@ -60,8 +60,8 @@ and the idle sweep lowers the resting level.
 
 The clock runs from the last **read** of an entry, or from its fill settling if
 nothing has read it since, so something fetched once and used every second never
-expires. A slow read still gets its full timeout for reuse, because the clock
-starts after its download ends. The sweep skips reads in flight.
+expires. The sweep skips reads in flight, and a slow read still gets its full
+timeout for reuse because the clock starts after its download ends.
 
 The interval is a quarter of the timeout, bounding the lag between an entry
 going idle and being reclaimed at about 1.25x rather than 2x. The interval is

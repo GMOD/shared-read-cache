@@ -27,9 +27,9 @@ cannot detect that mismatch at runtime, because `sizeOf` is opaque by design.
 bbi, nclist, hic and indexedfasta use the cache mostly for its de-duplication:
 one read per key, shared by every caller, with an abort that does not reject the
 others. Their `maxSize` is an entry count that is easy to set because the values
-are small and few. indexedfasta is the degenerate case, and a real one:
-`new SharedReadCache({})`, one entry, never evicted, with the fill passed per
-`get()` call. In that pattern the package is a memo.
+are small and few. indexedfasta, the degenerate case and a real one, uses the
+package as a memo: `new SharedReadCache({})`, one entry, never evicted, with the
+fill passed per `get()` call.
 
 ## Where the measurements live
 
@@ -43,8 +43,8 @@ are small and few. indexedfasta is the degenerate case, and a real one:
   and
   [ADR 0015](https://github.com/GMOD/bam-js/blob/main/agent-docs/architecture-decision-records/0015-reclaim-the-chunk-cache-when-nothing-is-using-it.md).
 - **Why a per-file ceiling bounds nothing, and what an equal split cost** —
-  [bam-js ADR 0018](https://github.com/GMOD/bam-js/blob/main/agent-docs/architecture-decision-records/0018-a-per-file-ceiling-is-not-a-bound-on-a-consumer-with-many-files.md).
-  That ADR is why `SharedBudget` exists.
+  [bam-js ADR 0018](https://github.com/GMOD/bam-js/blob/main/agent-docs/architecture-decision-records/0018-a-per-file-ceiling-is-not-a-bound-on-a-consumer-with-many-files.md),
+  the ADR that led to `SharedBudget`.
 - **Why the batch eviction policy is gone** — cram-js adopted it and then
   dropped it
   ([ADR 0005](https://github.com/GMOD/cram-js/blob/main/docs/adr/0005-drop-the-batch-eviction-policy.md),

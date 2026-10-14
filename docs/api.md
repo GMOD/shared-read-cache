@@ -99,7 +99,7 @@ const cache = new SharedReadCache({ budget, sizeOf: v => v.byteLength, fill })
 
 - **`limit`** — settable; lowering it evicts immediately.
 - **`total`** — settled weight held across every live member.
-- **`size`** — members still alive. Exposed for tests.
+- **`size`** — members still alive, exposed for tests.
 - **`evict()`** — evict until back under the limit, or until no member will give
   up another. The member cache calls it for you when it settles a read.
 - **`register(member)`** / **`charge(membership, delta)`** — how a
@@ -121,8 +121,8 @@ do not need, because they touch only `.aborted`.
 
 ## `BudgetMember`
 
-What a `SharedBudget` needs from a cache: `lruSpare()` and `release(cacheKey)`.
-`SharedReadCache` implements it. Exported as a type for anyone reading the
+What a `SharedBudget` needs from a cache: `lruSpare()` and `release(cacheKey)`,
+which `SharedReadCache` implements. Exported as a type for anyone reading the
 budget's signature, not as an extension point.
 
 ## `Budget` / `BudgetMembership`

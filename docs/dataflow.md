@@ -6,11 +6,11 @@
 [CONTRIBUTING.md](../CONTRIBUTING.md) for how to re-render it.
 
 A `get()` maps the key through `cacheKey`, and either joins the entry already
-under that key or starts one. Either way the caller awaits **one** promise per
-key. The read runs under an `AbortController` held by the entry, not under any
-caller's signal, and `get()` checks the caller's own signal on the way in and
-again when the read settles. The package exists for that separation, so that a
-caller that gives up sees its own cancellation while everyone else keeps the
+under that key or starts one, so either way the caller awaits **one** promise
+per key. The read runs under an `AbortController` held by the entry, not under
+any caller's signal, and `get()` checks the caller's own signal on the way in
+and again when the read settles. The package exists for that separation, so that
+a caller that gives up sees its own cancellation while everyone else keeps the
 read.
 
 Only two things about a key are per-caller: whether _this_ caller aborted, and

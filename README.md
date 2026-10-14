@@ -128,7 +128,7 @@ the file count instead.
 
 ## Why `sizeOf`
 
-`sizeOf` weighs a settled value against the budget. Omit it and the budget
+`sizeOf` weighs a settled value against the budget; without it, the budget
 counts entries.
 
 Four gmod packages hand-rolled this cache, differing only in how they weighed an
@@ -147,8 +147,8 @@ which a plain LRU package could not do.
 - The cache keeps the last settled entry whatever the budget. A value larger
   than the whole budget is still worth holding; dropping it only costs an
   immediate re-read.
-- Eviction never touches a read in flight. Dropping the promise would lose the
-  de-duplication its callers rely on.
+- Eviction never touches a read in flight, because dropping the promise would
+  lose the de-duplication its callers rely on.
 
 ## Relationship to `@gmod/abortable-promise-cache`
 
