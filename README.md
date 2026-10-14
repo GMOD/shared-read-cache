@@ -6,8 +6,8 @@ shared by everyone who asks for it while it is in flight, cancelled only once
 
 ## Why
 
-Memoizing a bare promise built from the first caller's signal makes that
-caller's abort reject everyone else awaiting it. In a genome browser, panning
+When a cache memoizes a bare promise built from the first caller's signal, that
+caller's abort rejects everyone else awaiting it. In a genome browser, panning
 away from one block then fails its still-wanted siblings.
 
 ```js
@@ -31,7 +31,7 @@ sits below it and caches the raw HTTP byte ranges underneath a filehandle.
   where a caller's signal is checked, what `join` does with it, and what
   settling an entry costs
 - [docs/memory.md](docs/memory.md) — the four ways an entry leaves the cache,
-  and what each of `maxSize`, `idleTimeoutMs` and `SharedBudget` measured
+  and the measurements behind `maxSize`, `idleTimeoutMs` and `SharedBudget`
 - [docs/api.md](docs/api.md) — every option and method
 - [docs/consumers.md](docs/consumers.md) — which gmod package uses this for
   what, which of them can share a budget, and where each measurement above was
@@ -65,7 +65,7 @@ the values are large or the object is long-lived.
 Setting `cache.maxSize = n` later evicts immediately, so a consumer can shed
 memory under pressure.
 
-## `idleTimeoutMs` — reclaiming while nothing is happening
+## Reclaiming idle memory with `idleTimeoutMs`
 
 The cache checks `maxSize` when a read settles, so an idle cache stays at the
 level it reached. For an object that lasts as long as its UI, such as a genome
@@ -83,9 +83,9 @@ const cache = new SharedReadCache({
 
 Use the two options together:
 
-- Set `maxSize` generously. Below one request's working set it caches _nothing_:
-  each value falls out before the next request can reuse it, while the reads in
-  flight hold their memory anyway.
+- Set `maxSize` generously. Below one request's working set it caches _nothing_,
+  because the cache evicts each value before the next request can reuse it,
+  while the reads in flight hold their memory anyway.
 - `idleTimeoutMs` makes a generous ceiling affordable, because memory peaks
   under load and falls back when idle.
 
@@ -110,8 +110,8 @@ The sweep timer:
 
 A per-cache ceiling does not bound a consumer that opens many caches, such as
 one per open file. `SharedBudget` bounds them in aggregate and evicts the
-globally least-recently-used entry, so an idle cache hands its space to a busy
-one:
+globally least-recently-used entry, so a busy cache can use the space an idle
+one is not using:
 
 ```js
 const budget = new SharedBudget(1024 * 2 ** 20)
@@ -120,8 +120,8 @@ const cache = new SharedReadCache({ budget, sizeOf, fill })
 
 - `SharedBudget` works alongside `maxSize`; it does not replace it.
 - It holds its members weakly, so there is no `unregister` to call.
-- Every member must measure size in the same unit. Adding one cache's bytes to
-  another's entry counts bounds neither.
+- Every member must measure size in the same unit. A budget that adds one
+  cache's bytes to another's entry counts bounds neither.
 
 [docs/memory.md](docs/memory.md) has the measurement for dividing a ceiling by
 the file count instead.
@@ -137,15 +137,16 @@ weighs bytes, and `@gmod/bbi` weighs entries. The cache can only call `sizeOf`
 once a read settles, so a cache that budgets this way has to own its entries,
 which a plain LRU package could not do.
 
-## Behaviour worth knowing
+## Behaviour
 
 - A caller with no signal pins the read. It can never abort, so aborting every
   other caller does not stop the read, and the read is uncancellable for
   everyone joined to it.
 - The cache drops a rejection rather than caching it, so one transient failure
-  does not poison the key for the life of the cache.
-- The last settled entry survives any budget. A value larger than the whole
-  budget is still worth holding; dropping it only costs an immediate re-read.
+  does not make the key fail for the life of the cache.
+- The cache keeps the last settled entry whatever the budget. A value larger
+  than the whole budget is still worth holding; dropping it only costs an
+  immediate re-read.
 - Eviction never touches a read in flight. Dropping the promise would lose the
   de-duplication its callers rely on.
 
