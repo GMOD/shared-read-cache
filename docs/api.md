@@ -31,8 +31,8 @@ The package exports the type of the options object as
 ### `get(key, signal?, fill?)`
 
 The value for `key`, reading it if nothing has. Callers arriving while the read
-is in flight join it rather than starting a second one, and each caller's
-promise rejects only for that caller's own cancellation. `get()` rejects
+is in flight join it rather than starting a second one, and each caller learns
+of its own cancellation alone, never another caller's. `get()` rejects
 immediately if `signal` has already aborted, and as soon as it aborts while the
 read is in flight. The read itself continues for the callers that still want it.
 See [dataflow.md](dataflow.md).

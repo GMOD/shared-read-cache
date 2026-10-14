@@ -15,8 +15,8 @@ The three automatic mechanisms never drop a read still in flight, which has no
 weight to reclaim and whose waiters rely on its de-duplication. `maxSize` and a
 `SharedBudget` also keep a cache's last settled entry, which the caller needs
 for the request in flight; the idle sweep does not, because its purpose is to
-reclaim everything from a cache nobody is reading. The cache never refuses a
-value for being too large, so the worst any budget can cost is a re-read.
+reclaim everything from a cache nobody is reading. So the worst any budget can
+cost is a re-read: the cache never refuses a value for being too large.
 
 ## Why `sizeOf`
 
@@ -106,8 +106,7 @@ A per-cache ceiling does not bound a consumer that scales the number of caches.
 `@gmod/bam`'s 1 GB default is sized so a single track's pan never thrashes;
 jbrowse holds one `BamFile` per open track, and three moderately deep alignment
 tracks browsing eight windows measured 1109 MB retained and 1665 MB RSS with
-**no cache anywhere near its own ceiling**, so none of that memory came from a
-cache filling its own ceiling.
+**no cache anywhere near its own ceiling**, so the budget caused none of it.
 
 Dividing the ceiling by the file count re-creates the cliff above. On that same
 three-track workload, 1 GB split as 342 MB each cost 16 refills on the revisit;
