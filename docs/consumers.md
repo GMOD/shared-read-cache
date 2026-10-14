@@ -18,10 +18,9 @@ members and means nothing unless they weigh the same thing.
 
 bam, tabix and cram can share one budget, because all three weigh decompressed
 bytes, and a genome browser's memory problem is the sum across formats rather
-than any one of them. jbrowse puts all three on one budget. cram weighed decoded
-records until v14, which is why older text here calls it the odd one out. bbi,
-nclist and hic weigh entries, so those cannot join a byte budget. The cache
-cannot detect that mismatch at runtime, because `sizeOf` is opaque by design.
+than any one of them. jbrowse puts all three on one budget. bbi, nclist and hic
+weigh entries, so those cannot join a byte budget. The cache cannot detect that
+mismatch at runtime, because `sizeOf` is opaque by design.
 
 bbi, nclist, hic and indexedfasta use the cache mostly for its de-duplication:
 one read per key, shared by every caller, with an abort that does not reject the

@@ -27,15 +27,12 @@ sits below it and caches the raw HTTP byte ranges underneath a filehandle.
 
 ## Docs
 
-- [docs/dataflow.md](docs/dataflow.md) — how one `get()` flows, with a diagram:
-  where a caller's signal is checked, what `join` does with it, and what
-  settling an entry costs
-- [docs/memory.md](docs/memory.md) — the four ways an entry leaves the cache,
-  and the measurements behind `maxSize`, `idleTimeoutMs` and `SharedBudget`
+- [docs/dataflow.md](docs/dataflow.md) — how one `get()` flows
+- [docs/memory.md](docs/memory.md) — how entries leave the cache, and the
+  measurements behind the budgets
 - [docs/api.md](docs/api.md) — every option and method
-- [docs/consumers.md](docs/consumers.md) — which gmod package uses this for
-  what, which of them can share a budget, and where each measurement above was
-  taken
+- [docs/consumers.md](docs/consumers.md) — which gmod packages use this, and
+  where each measurement was taken
 
 ## Budgets are opt-in
 
@@ -54,7 +51,8 @@ A budget bounds _retained_ memory, not request size:
 
 - The cache never turns a value away for being too large. A value bigger than
   the whole budget still goes in.
-- Eviction never touches a read in flight.
+- Eviction never touches a read in flight, because dropping the promise would
+  lose the de-duplication its callers rely on.
 - Eviction only discards values the cache has already handed back once, so the
   worst a budget can cost is a re-read.
 
@@ -68,9 +66,7 @@ memory under pressure.
 ## `idleTimeoutMs` — reclaiming while nothing is happening
 
 The cache checks `maxSize` when a read settles, so an idle cache stays at the
-level it reached. For an object that lasts as long as its UI, such as a genome
-browser parked on a region across every open track, that resting level is the
-memory that matters, and no budget alone lowers it.
+level it reached, and no budget alone lowers it.
 
 ```js
 const cache = new SharedReadCache({
@@ -129,13 +125,9 @@ the file count instead.
 ## Why `sizeOf`
 
 `sizeOf` weighs a settled value against the budget; without it, the budget
-counts entries.
-
-Four gmod packages hand-rolled this cache, differing only in how they weighed an
-entry: `@gmod/bam` and `@gmod/tabix` weigh decompressed bytes, `@gmod/cram`
-weighs bytes, and `@gmod/bbi` weighs entries. The cache can only call `sizeOf`
-once a read settles, so a cache that budgets this way has to own its entries,
-which a plain LRU package could not do.
+counts entries. The cache can only call `sizeOf` once a read settles, so a cache
+that budgets this way has to own its entries, which a plain LRU package cannot
+do. [docs/consumers.md](docs/consumers.md) lists what each gmod package weighs.
 
 ## Behaviour
 
@@ -144,11 +136,6 @@ which a plain LRU package could not do.
   everyone joined to it.
 - The cache drops a rejection rather than caching it, so one transient failure
   does not make the key fail for the life of the cache.
-- The cache keeps the last settled entry whatever the budget. A value larger
-  than the whole budget is still worth holding; dropping it only costs an
-  immediate re-read.
-- Eviction never touches a read in flight, because dropping the promise would
-  lose the de-duplication its callers rely on.
 
 ## Relationship to `@gmod/abortable-promise-cache`
 
