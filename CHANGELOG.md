@@ -1,3 +1,15 @@
+## [2.1.0](https://github.com/GMOD/shared-read-cache/compare/v2.0.1...v2.1.0) (2026-10-14)
+
+### Other Changes
+
+- Rewrite AI-writing tropes in README and docs ([c427873](https://github.com/GMOD/shared-read-cache/commit/c4278735d73a5b59137978688bdc3ec598658e3d))
+- Restore claims changed by the tropes rewrite ([457200a](https://github.com/GMOD/shared-read-cache/commit/457200a8bc36e80e3f90df1f9f26f6a05dd9d511))
+- Fold short verdict sentences into their neighbours ([0f259cc](https://github.com/GMOD/shared-read-cache/commit/0f259cca5d5879b78a0378b8071b88305e65cf9f))
+- Restore wording the tropes rewrite changed without a trope ([3bdee75](https://github.com/GMOD/shared-read-cache/commit/3bdee7569884eded0380b2e3e9d6d5847269389c))
+- Trim wordiness in README and docs ([5f340a2](https://github.com/GMOD/shared-read-cache/commit/5f340a208b874f5607115a7f2480ae1fbf78b7a9))
+- Keep one entry per shared budget, not one per member ([85f4dda](https://github.com/GMOD/shared-read-cache/commit/85f4ddac8a946b198ae2aeac404a51c10f9e48ea))
+- Trim source comments to what the code doesn't say ([c7d5cd0](https://github.com/GMOD/shared-read-cache/commit/c7d5cd08889f6d445fb358d02a9baa9512ee4342))
+
 ## [2.0.1](https://github.com/GMOD/shared-read-cache/compare/v2.0.0...v2.0.1) (2026-10-11)
 
 ### Documentation
