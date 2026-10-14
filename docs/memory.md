@@ -31,7 +31,7 @@ Omit `sizeOf` and the budget counts entries.
 
 ## Set `maxSize` generously
 
-A budget set below one request's working set does not cache less; it caches
+Set below one request's working set, a budget does not cache less; it caches
 _nothing_. The cache evicts each value before the next request can reuse it,
 while the reads in flight retain their memory anyway. That cliff is the reason
 the per-cache default is `Infinity`, since a sensible limit depends entirely on
@@ -45,9 +45,9 @@ which also has what a pinned budget twenty times under the default cost: 47
 refills out of 47 against 0).
 
 `cache.maxSize = n` is an accessor, not a field, so lowering it evicts
-immediately. When `maxSize` was a plain field, lowering it did nothing until the
-next read ran the eviction loop, which never happens on an idle consumer,
-although a consumer lowers `maxSize` precisely to shed memory under pressure.
+immediately. As a plain field it did nothing until the next read happened to run
+the eviction loop, which on an idle consumer never happens — yet a consumer
+lowers `maxSize` precisely to shed memory under pressure.
 
 ## `idleTimeoutMs` turns the ceiling into a peak
 
@@ -86,7 +86,7 @@ connection, which is exactly when a consumer gives up. With an empty-map
 condition, that one hung read kept the timer, the cache and everything its fill
 closed over alive forever.
 
-## One eviction policy
+## There is one eviction policy
 
 Versions before 2.0 offered `evictionPolicy: 'batch'`, which deferred eviction
 until no read was in flight and then spared everything that batch had touched.
@@ -112,7 +112,7 @@ Dividing the ceiling by the file count re-creates the cliff above. On that same
 three-track workload, 1 GB split as 342 MB each cost 16 refills on the revisit;
 split eight ways as 128 MB each it cost 101, against 98 for the cold pass, which
 is worse than no cache at all. A shared budget avoids that failure, because a
-member gives up only what is _globally_ least-recently-used. Entries from tracks
+member yields only what is _globally_ least-recently-used. Entries from tracks
 the reader is not looking at become the oldest and go first, which frees space
 for the track being panned, so the active track keeps a working set whatever the
 track count.
@@ -128,9 +128,9 @@ Before using a `SharedBudget`, note two things:
   would be adding bytes to entries and bounding neither. `sizeOf` is opaque by
   design, so the cache cannot detect a mismatch at runtime. Group members by
   unit, with one budget per group.
-- A budget works alongside `maxSize` rather than replacing it. A cache that
-  passes only a budget is unbounded on its own and bounded in aggregate, which
-  is usually what you want, because sharing lets one busy member use most of the
+- A budget composes with `maxSize` rather than replacing it. A cache that passes
+  only a budget is unbounded on its own and bounded in aggregate, which is
+  usually what you want, because sharing lets one busy member use most of the
   total. Each cache gets under its own ceiling first and only then competes for
   the shared one.
 
@@ -155,14 +155,14 @@ first", so the cache keeps both.
 For the same reason, a read settling stamps `lastTouched` but deliberately does
 not `touch()` the entry. A read's latency is a property of the transport, not of
 how the consumer is using the cache, so ordering evictions by it preferentially
-keeps whatever was slowest to arrive. In `@gmod/tabix` that is the largest chunk
-in the query, which is the last thing a budget should retain.
+keeps whatever was slowest to arrive — in `@gmod/tabix` that is the largest
+chunk in the query, which is the last thing a budget should retain.
 
 ## Limits
 
 The budget bounds retained weight, not the heap. Reads in flight are never
 evicted, a query holds everything it parsed until it returns whether or not the
-cache still does, and a value weighed once at settle can grow afterwards.
+cache still does, and a value weighed once at settle can grow afterwards —
 `@gmod/bam` memoizes `end`, `CIGAR` and `tags` onto a record the first time a
 renderer touches them, and measured +38% over the weighed size. Size these
 against what you want to _keep_, and bound total memory somewhere that can see

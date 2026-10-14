@@ -65,7 +65,7 @@ the values are large or the object is long-lived.
 Setting `cache.maxSize = n` later evicts immediately, so a consumer can shed
 memory under pressure.
 
-## Reclaiming idle memory with `idleTimeoutMs`
+## `idleTimeoutMs` — reclaiming while nothing is happening
 
 The cache checks `maxSize` when a read settles, so an idle cache stays at the
 level it reached. For an object that lasts as long as its UI, such as a genome

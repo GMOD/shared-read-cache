@@ -14,8 +14,8 @@ a caller that gives up sees its own cancellation while everyone else keeps the
 read.
 
 Only two things about a key are per-caller: whether _this_ caller aborted, and
-whether its abort was the last one. Everything else belongs to the entry: the
-promise, the value, its weight against the budget and its position in LRU order.
+whether its abort was the last one. Everything else — the promise, the value,
+its weight against the budget, its position in LRU order — belongs to the entry.
 
 ## Why the caller's signal is checked twice
 
@@ -73,12 +73,12 @@ read against its own caller's signal, and unsubscribes whichever way the race
 goes. A caller with a duck-typed signal cannot be raced, so it falls back to the
 check after the read settles, which is the most an unsubscribable signal allows.
 
-## Abandoned entries
+## The doomed-entry branch
 
 A read every caller has abandoned has aborted its controller but has not
 necessarily rejected yet, so for a moment the map still holds it. A caller that
 joined such an entry would get a cancellation that has nothing to do with it, so
-`get()` and `getIfCached()` both treat the entry as a miss: `get()` drops it and
+both `get()` and `getIfCached()` treat the entry as a miss: `get()` drops it and
 starts a fresh read, and `getIfCached()` drops it and answers `undefined`.
 
 ## What settling does
@@ -100,10 +100,10 @@ cache.
 
 Eviction runs only after settling; see [memory.md](memory.md).
 
-## Omitted from the diagram
+## What the diagram leaves out
 
-The diagram omits `getIfCached()`, which is the same lookup without the read,
-without waiter registration and without the per-caller abort translation;
+The diagram leaves out `getIfCached()`, which is the same lookup without the
+read, without waiter registration and without the per-caller abort translation;
 `has()`, which is the only lookup that does _not_ mark an entry
 most-recently-used; and the `fill` passed per `get()` call rather than on the
 constructor, which changes where the read comes from and nothing else about the

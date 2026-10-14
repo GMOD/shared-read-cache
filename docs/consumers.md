@@ -1,11 +1,10 @@
 # Who uses this, and what they weigh
 
 Every number in [memory.md](memory.md) was measured in a consumer rather than
-here, because this package has no I/O of its own and a benchmark of it in
-isolation would measure only a `Map`. This page lists which repo each claim
-comes from, and answers whether two of them can share a budget, since a budget's
-total is a sum over its members and means nothing unless they weigh the same
-thing.
+here — this package has no I/O of its own, so a benchmark of it in isolation
+measures a `Map`. This page lists which repo each claim comes from, and answers
+whether two of them can share a budget, since a budget's total is a sum over its
+members and means nothing unless they weigh the same thing.
 
 | package                                                         | what it caches                                 | `sizeOf` unit                                             | budget?            |
 | --------------------------------------------------------------- | ---------------------------------------------- | --------------------------------------------------------- | ------------------ |

@@ -14,19 +14,19 @@ read returns. `cacheKey` maps the first to a string; `sizeOf` weighs the second.
 ## `new SharedReadCache(options?)`
 
 Every option is optional, and so is the object. `new SharedReadCache({})` is
-common, as a memo whose fill is a closure passed to each `get()` call.
+common, as a memo whose fill is a closure passed per `get()` call.
 
 The package exports the type of the options object as
 `SharedReadCacheOptions<K, V>`.
 
-| option              | default       | what it does                                                                                                                                                                                                                                                                                                                                  |
-| ------------------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `fill(key, signal)` | none          | Performs the read under the **shared** signal rather than any one caller's. The shared signal aborts only once every caller waiting on this key has aborted. Either this or a per-call `fill` must be present.                                                                                                                                |
-| `cacheKey(key)`     | `String(key)` | Maps a key to its cache key.                                                                                                                                                                                                                                                                                                                  |
-| `sizeOf(value)`     | `() => 1`     | Weighs a settled value against the budget. The default makes the budget an entry count. A value it cannot weigh (a throw, `NaN`, a negative) reaches the caller as normal but is not cached, since the budget could not account for it. See [memory.md](memory.md#why-sizeof), and [consumers.md](consumers.md) for what each package weighs. |
-| `maxSize`           | `Infinity`    | Budget, in whatever unit `sizeOf` returns.                                                                                                                                                                                                                                                                                                    |
-| `idleTimeoutMs`     | none          | Drop an entry once nothing has asked for it for this long. `0`, a negative and `Infinity` all mean never.                                                                                                                                                                                                                                     |
-| `budget`            | none          | A [`SharedBudget`](#new-sharedbudgetlimit) this cache joins. Works alongside `maxSize` rather than replacing it.                                                                                                                                                                                                                              |
+| option              | default       | what it does                                                                                                                                                                                                                                                                                                                                      |
+| ------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fill(key, signal)` | none          | Performs the read under the **shared** signal rather than any one caller's. The shared signal aborts only once every caller waiting on this key has aborted. Either this or a per-call `fill` must be present.                                                                                                                                    |
+| `cacheKey(key)`     | `String(key)` | Maps a key to its cache key.                                                                                                                                                                                                                                                                                                                      |
+| `sizeOf(value)`     | `() => 1`     | Weighs a settled value against the budget. The default makes the budget an entry count. A value it cannot weigh — a throw, `NaN`, a negative — is served to the caller as normal but not cached, since the budget could not account for it. See [memory.md](memory.md#why-sizeof), and [consumers.md](consumers.md) for what each package weighs. |
+| `maxSize`           | `Infinity`    | Budget, in whatever unit `sizeOf` returns.                                                                                                                                                                                                                                                                                                        |
+| `idleTimeoutMs`     | none          | Drop an entry once nothing has asked for it for this long. `0`, a negative and `Infinity` all mean never.                                                                                                                                                                                                                                         |
+| `budget`            | none          | A [`SharedBudget`](#new-sharedbudgetlimit) this cache joins. Composes with `maxSize` rather than replacing it.                                                                                                                                                                                                                                    |
 
 ### `get(key, signal?, fill?)`
 
@@ -48,7 +48,7 @@ caching it, so the next caller starts over.
 
 The promise under `key`, or `undefined` if there is none. Marks the entry
 most-recently-used exactly as `get()` does, so although it doesn't start a read,
-it still changes LRU order.
+it still touches LRU order.
 
 The promise is the shared one, so awaiting it neither registers the caller as a
 waiter nor re-reports the rejection per caller. `getIfCached()` also returns
@@ -59,7 +59,7 @@ holds no value, only a rejection that has not arrived yet.
 
 Whether `get()` would be answered from the cache, by a settled value or a read
 still in flight. `has()` returns false for a read every caller has abandoned,
-which `get()` would replace, and is the only lookup that does not change LRU
+which `get()` would replace, and is the only lookup that does not touch LRU
 order.
 
 ### `delete(key)` / `clear()`
